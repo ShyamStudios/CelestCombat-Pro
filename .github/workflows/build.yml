@@ -6,29 +6,32 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+permissions: write-all
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          distribution: temurin
+          java-version: 21
           cache: gradle
 
-      - name: Grant execute permission for gradlew
+      - name: Grant execute permission for Gradle
         run: chmod +x gradlew
 
       - name: Build with Gradle
-        run: ./gradlew build
+        run: ./gradlew build --no-daemon
 
-      - name: Upload JAR artifact
+      - name: Upload JAR Artifact
         uses: actions/upload-artifact@v4
         with:
           name: CelestCombat-Pro-build-${{ github.run_number }}
@@ -44,46 +47,45 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ **Build Successful**\n\nJAR artifact has been generated and is ready for testing.'
+              body: "✅ **Build Successful**\n\nThe plugin compiled successfully and the JAR artifact is ready for testing."
             })
 
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: needs.build.result == 'success'
+    if: github.event_name == 'push' && needs.build.result == 'success'
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Download JAR artifact
+      - name: Download Build Artifact
         uses: actions/download-artifact@v4
         with:
           name: CelestCombat-Pro-build-${{ github.run_number }}
           path: build/libs
 
-      - name: Get commit info
-        id: commit-info
+      - name: Get Commit Info
+        id: commit
         run: |
           echo "commit=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "branch=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
-          echo "build_number=${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "branch=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "build=${{ github.run_number }}" >> $GITHUB_OUTPUT
 
-      - name: Create development release
+      - name: Create Dev Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: dev-build-${{ github.run_number }}
           name: Dev Build ${{ github.run_number }}
           files: build/libs/*.jar
+          prerelease: true
           body: |
             🚧 **Development Build**
 
-            🔹 **Branch:** ${{ steps.commit-info.outputs.branch }}
-            🔹 **Commit:** ${{ steps.commit-info.outputs.commit }}
-            🔹 **Build Number:** ${{ steps.commit-info.outputs.build_number }}
+            **Branch:** ${{ steps.commit.outputs.branch }}
+            **Commit:** ${{ steps.commit.outputs.commit }}
+            **Build Number:** ${{ steps.commit.outputs.build }}
 
-            ⚠️ Testing build – may contain bugs.
-          prerelease: true
+            ⚠️ This is an automated development build and may contain bugs.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
