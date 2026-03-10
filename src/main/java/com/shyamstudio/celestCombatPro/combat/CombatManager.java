@@ -1,6 +1,7 @@
 package com.shyamstudio.celestCombatPro.combat;
 
 import com.shyamstudio.celestCombatPro.CelestCombatPro;
+import com.shyamstudio.celestCombatPro.configs.EventPriorityManager;
 import com.shyamstudio.celestCombatPro.Scheduler;
 import lombok.Getter;
 import org.bukkit.Bukkit;
@@ -44,6 +45,23 @@ public class CombatManager {
     private boolean tridentEnabled;
     private boolean refreshCombatOnTridentLand;
     private Map<String, Boolean> worldTridentBannedSettings = new ConcurrentHashMap<>();
+    
+    // UXM Claims configuration cache
+    private boolean uxmClaimsEnabled;
+    private Map<String, Boolean> worldUXMClaimsSettings = new ConcurrentHashMap<>();
+    
+    // Ender pearl fix configuration cache
+    private boolean enderPearlFixEnabled;
+    private boolean preventBlockStuck;
+    private boolean preventMicroTeleport;
+    private boolean preventBarrierGlitch;
+    private boolean preventTightSpaces;
+    private double minTeleportDistance;
+    private int maxBlockCheckRadius;
+    private int maxSurroundingBlocks;
+    
+    // Event priority manager for configurable event priorities
+    @Getter private final EventPriorityManager eventPriorityManager;
 
     public CombatManager(CelestCombatPro plugin) {
         this.plugin = plugin;
@@ -51,6 +69,9 @@ public class CombatManager {
         this.combatTasks = new ConcurrentHashMap<>();
         this.combatOpponents = new ConcurrentHashMap<>();
         this.enderPearlCooldowns = new ConcurrentHashMap<>();
+        
+        // Initialize event priority manager
+        this.eventPriorityManager = new EventPriorityManager(plugin);
 
         // Cache configuration values to avoid repeated lookups
         this.combatDurationTicks = plugin.getTimeFromConfig("combat.duration", "20s");
@@ -74,6 +95,12 @@ public class CombatManager {
 
         // Load per-world settings
         loadWorldEnderPearlSettings();
+        
+        // Load UXM Claims settings
+        loadUXMClaimsSettings();
+        
+        // Load ender pearl fix settings
+        loadEnderPearlFixSettings();
 
         // Start the global countdown timer
         startGlobalCountdownTimer();
@@ -103,6 +130,9 @@ public class CombatManager {
     }
 
     public void reloadConfig() {
+        // Reload event priorities first
+        eventPriorityManager.loadPriorities();
+        
         // Update cached configuration values
         this.combatDurationTicks = plugin.getTimeFromConfig("combat.duration", "20s");
         this.combatDurationSeconds = combatDurationTicks / 20;
@@ -121,6 +151,12 @@ public class CombatManager {
         this.tridentInCombatOnly = plugin.getConfig().getBoolean("trident_cooldown.in_combat_only", true);
         this.refreshCombatOnTridentLand = plugin.getConfig().getBoolean("trident.refresh_combat_on_land", false);
         loadWorldTridentSettings();
+        
+        // Load UXM Claims settings
+        loadUXMClaimsSettings();
+        
+        // Load ender pearl fix settings
+        loadEnderPearlFixSettings();
     }
 
 
@@ -617,5 +653,69 @@ public class CombatManager {
         combatOpponents.clear();
         enderPearlCooldowns.clear();
         tridentCooldowns.clear();
+    }
+    
+    private void loadUXMClaimsSettings() {
+        this.uxmClaimsEnabled = plugin.getConfig().getBoolean("uxm_claims_protection.enabled", true);
+        worldUXMClaimsSettings.clear();
+        
+        if (plugin.getConfig().isConfigurationSection("uxm_claims_protection.worlds")) {
+            for (String worldName : Objects.requireNonNull(plugin.getConfig().getConfigurationSection("uxm_claims_protection.worlds")).getKeys(false)) {
+                boolean enabled = plugin.getConfig().getBoolean("uxm_claims_protection.worlds." + worldName, uxmClaimsEnabled);
+                worldUXMClaimsSettings.put(worldName, enabled);
+            }
+        }
+    }
+    
+    private void loadEnderPearlFixSettings() {
+        this.enderPearlFixEnabled = plugin.getConfig().getBoolean("enderpearl_fix.enabled", true);
+        this.preventBlockStuck = plugin.getConfig().getBoolean("enderpearl_fix.prevent_block_stuck", true);
+        this.preventMicroTeleport = plugin.getConfig().getBoolean("enderpearl_fix.prevent_micro_teleport", true);
+        this.preventBarrierGlitch = plugin.getConfig().getBoolean("enderpearl_fix.prevent_barrier_glitch", true);
+        this.preventTightSpaces = plugin.getConfig().getBoolean("enderpearl_fix.prevent_tight_spaces", true);
+        this.minTeleportDistance = plugin.getConfig().getDouble("enderpearl_fix.min_teleport_distance", 1.2);
+        this.maxBlockCheckRadius = plugin.getConfig().getInt("enderpearl_fix.max_block_check_radius", 3);
+        this.maxSurroundingBlocks = plugin.getConfig().getInt("enderpearl_fix.max_surrounding_blocks", 6);
+    }
+    
+    // Getter methods for cached config values
+    public boolean isUXMClaimsEnabled() {
+        return uxmClaimsEnabled;
+    }
+    
+    public boolean isUXMClaimsEnabledInWorld(String worldName) {
+        return worldUXMClaimsSettings.getOrDefault(worldName, uxmClaimsEnabled);
+    }
+    
+    public boolean isEnderPearlFixEnabled() {
+        return enderPearlFixEnabled;
+    }
+    
+    public boolean shouldPreventBlockStuck() {
+        return preventBlockStuck;
+    }
+    
+    public boolean shouldPreventMicroTeleport() {
+        return preventMicroTeleport;
+    }
+    
+    public boolean shouldPreventBarrierGlitch() {
+        return preventBarrierGlitch;
+    }
+    
+    public boolean shouldPreventTightSpaces() {
+        return preventTightSpaces;
+    }
+    
+    public double getMinTeleportDistance() {
+        return minTeleportDistance;
+    }
+    
+    public int getMaxBlockCheckRadius() {
+        return maxBlockCheckRadius;
+    }
+    
+    public int getMaxSurroundingBlocks() {
+        return maxSurroundingBlocks;
     }
 }

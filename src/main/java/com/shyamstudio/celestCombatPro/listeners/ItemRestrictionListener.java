@@ -41,7 +41,7 @@ public class ItemRestrictionListener implements Listener {
         return formattedName.toString().trim();
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    // NOTE: This method is now registered dynamically with configurable priority
     public void onPlayerItemConsume(PlayerItemConsumeEvent event) {
         // Check if item restrictions are enabled
         if (!plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true)) {

@@ -81,7 +81,7 @@ public class CombatListeners implements Listener {
         plugin.debug("CombatListeners managers reloaded successfully");
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    // NOTE: This method is now registered dynamically with configurable priority
     public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
         if (!(event.getEntity() instanceof Player)) {
             return;
@@ -316,7 +316,10 @@ public class CombatListeners implements Listener {
         lastDamageTime.remove(playerUUID);
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    // Use LOW priority to ensure command blocking happens BEFORE other plugins (like EssentialsX GUI)
+    // process the command. This prevents plugins that don't respect cancelled events from bypassing
+    // the command restrictions during combat.
+    // NOTE: This method is now registered dynamically with configurable priority
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
         Player player = event.getPlayer();
 
@@ -370,7 +373,7 @@ public class CombatListeners implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    // NOTE: This method is now registered dynamically with configurable priority
     public void onPlayerToggleFlight(PlayerToggleFlightEvent event) {
         Player player = event.getPlayer();
 

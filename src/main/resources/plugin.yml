@@ -1,5 +1,5 @@
 name: CelestCombat-Pro
-version: '1.3.0'
+version: '1.3.1'
 main: com.shyamstudio.celestCombatPro.CelestCombatPro
 api-version: '1.21'
 authors: [ RaviRai, Nighter, WeThink ]
@@ -8,6 +8,8 @@ folia-supported: true
 
 soft-depend:
   - WorldGuard
+  - GriefPrevention
+  - UXMClaims
   - Multiverse-Core
   - Worlds
   - PlaceholderAPI

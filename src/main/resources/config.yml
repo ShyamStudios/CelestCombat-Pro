@@ -10,6 +10,37 @@
 debug: false
 
 #---------------------------------------------------
+#              EVENT PRIORITY SETTINGS
+#---------------------------------------------------
+# Configure event handler priorities to resolve conflicts with other plugins
+# Available priorities: LOWEST, LOW, NORMAL, HIGH, HIGHEST
+# LOWEST runs first, HIGHEST runs last
+# Use LOWEST/LOW to block events before other plugins process them
+# Use HIGH/HIGHEST to process events after other plugins
+#
+# IMPORTANT: After changing priorities, use /celestcombat reload to apply changes
+# Use /celestcombat eventpriority to view current priorities
+event_priorities:
+  # Command blocking priority - use LOW to block commands before GUI plugins like EssentialsX GUI
+  # If you have issues with command bypasses, try LOWEST
+  command_blocking: "LOW"
+  
+  # Combat damage event priority - usually HIGH is good for compatibility
+  combat_damage: "HIGH"
+  
+  # Player movement event priority - HIGH recommended for performance
+  player_movement: "HIGH"
+  
+  # Teleportation event priority - HIGH recommended to override other plugins
+  teleportation: "HIGH"
+  
+  # Item usage event priority - HIGH recommended for proper blocking
+  item_usage: "HIGH"
+  
+  # Flight control event priority - HIGH recommended
+  flight_control: "HIGH"
+
+#---------------------------------------------------
 #              CORE COMBAT SETTINGS
 #---------------------------------------------------
 combat:
@@ -68,8 +99,10 @@ combat:
       - ELYTRA
 
 #---------------------------------------------------
-#              ENDER PEARL RESTRICTIONS
+#         ENDER PEARL COOLDOWN SYSTEM
 #---------------------------------------------------
+# This controls cooldowns on ender pearl usage
+# This is SEPARATE from glitch prevention below
 enderpearl:
   # Refresh combat timer when player lands an ender pearl
   refresh_combat_on_land: false
@@ -87,6 +120,56 @@ enderpearl_cooldown:
   # Per-world settings (overrides global setting)
   worlds:
     minigames: false  # Example: cooldowns disabled in minigames world
+
+#---------------------------------------------------
+#         ENDER PEARL GLITCH PREVENTION
+#---------------------------------------------------
+# This prevents various ender pearl exploits and glitches
+# This is SEPARATE from cooldown system above
+enderpearl_fix:
+  # Master toggle for all ender pearl glitch fixes
+  enabled: true
+  
+  # 1 Block Clip / Wall Phase Glitch Prevention
+  # Players throw pearl close to wall/fence to clip through blocks
+  # Example: [Wall][Wall] ↑ Player throws pearl here to clip through
+  prevent_block_stuck: true
+  
+  # 2 Micro Teleport Glitch Prevention  
+  # Players throw pearl very close to themselves (0.2 blocks) to bypass anti-cheat
+  # Example: Player moves 0.2 blocks into wall using micro teleport
+  prevent_micro_teleport: true
+  
+  # Minimum distance required for teleportation (in blocks)
+  # Teleports shorter than this will be cancelled
+  # Recommended: 1.0-1.5 for PvP servers
+  min_teleport_distance: 1.2
+  
+  # 3 Barrier / Protected Region Glitch Prevention
+  # Players pearl through barrier blocks, bedrock, into WorldGuard regions
+  # Example: [Barrier][Barrier][Barrier] ↑ pearl lands here to bypass protection
+  prevent_barrier_glitch: true
+  
+  # Radius to check for problematic blocks around destination
+  # Plugin scans nearby blocks for: barrier, bedrock, protected blocks
+  # Higher values = more thorough checking but slightly more CPU usage
+  # Recommended: 2-3 for most servers
+  max_block_check_radius: 3
+  
+  # 4 Tight Space / Suffocation Glitch Prevention
+  # Prevents pearling into spaces surrounded by too many solid blocks
+  prevent_tight_spaces: true
+  
+  # How many solid blocks around the destination triggers prevention
+  # Higher = more strict (6-8 recommended for PvP)
+  max_surrounding_blocks: 6
+  
+  # Per-world settings for glitch fixes
+  worlds:
+    world: true
+    world_nether: true
+    world_the_end: true
+    minigames: false
 
 #---------------------------------------------------
 #              TRIDENT RESTRICTIONS
@@ -117,6 +200,7 @@ trident_cooldown:
     world_nether: false  # Disable cooldown in nether
     world_the_end: true  # Enable cooldown in end
     # Add more worlds as needed
+
 
 #---------------------------------------------------
 #                  DEATH EFFECTS
@@ -279,3 +363,128 @@ claim_protection:
     world_nether: true        # Enable in the nether
     world_the_end: false       # Disable in the end
     # Add more worlds as needed
+
+    #---------------------------------------------------
+#              UXM CLAIMS PROTECTION
+#---------------------------------------------------
+# Full integration with UXM Claims plugin (Paid Plugin Compatible)
+# Requires UXM Claims: https://builtbybit.com/resources/uxmclaims-all-in-one-claim-plugin.86890/
+uxm_claims_protection:
+  # Master toggle for UXM Claims integration
+  enabled: true
+  
+  # === COMBAT ENTRY PREVENTION ===
+  # Prevent players in combat from ENTERING claims (like GriefPrevention)
+  # When a combat player tries to enter a claim, they are pushed back
+  prevent_claim_entry: true
+  
+  # === COMBAT INSIDE CLAIMS ===
+  # Prevent players from STARTING combat inside claims
+  # Blocks PvP damage when either player is inside a claim
+  prevent_combat_in_claims: true
+  
+  # === OWNER/TRUSTED COMBAT ===
+  # Allow claim owners/trusted players to fight in their own claims
+  # If true, owners and members can fight in their claims even if prevent_combat_in_claims is true
+  allow_owner_combat: false
+  
+  # Allow trusted members to fight each other in claims
+  allow_trusted_combat: false
+  
+  # === MOVEMENT RESTRICTIONS ===
+  # Force applied to push players back from claim borders
+  # Higher = stronger push (0.3-1.0 recommended)
+  push_back_force: 0.6
+  
+  # Prevent teleportation into claims during combat (ender pearls, /tp, etc.)
+  prevent_teleport_entry: true
+  
+  # === ITEM RESTRICTIONS ===
+  # Block specific items from being used in claims during combat
+  block_combat_items:
+    enabled: true
+    items:
+      - ENDER_PEARL
+      - CHORUS_FRUIT
+      - TOTEM_OF_UNDYING
+  
+  # === COMMAND RESTRICTIONS ===
+  # Block commands when in combat inside claims
+  block_commands_in_claims: true
+  blocked_commands:
+    - "home"
+    - "spawn"
+    - "warp"
+    - "tpa"
+    - "back"
+  
+  # === FLIGHT RESTRICTIONS ===
+  # Disable flight when entering claims during combat
+  disable_flight_in_claims: true
+  
+  # === MESSAGING SYSTEM ===
+  # Send message when player is blocked from entering claim
+  send_entry_blocked_message: true
+  
+  # Send message when combat is blocked in claim
+  send_combat_blocked_message: true
+  
+  # Send message when teleportation is blocked
+  send_teleport_blocked_message: true
+  
+  # Cooldown between messages (in seconds) to prevent spam
+  message_cooldown: 2
+  
+  # === CLAIM TYPES ===
+  # Different rules for different claim types
+  claim_types:
+    # Admin claims (created by admins)
+    admin_claims:
+      prevent_entry: true
+      prevent_combat: true
+      allow_owner_combat: false
+    
+    # Player claims (created by players)
+    player_claims:
+      prevent_entry: true
+      prevent_combat: true
+      allow_owner_combat: false
+    
+    # Public claims (open to everyone)
+    public_claims:
+      prevent_entry: false
+      prevent_combat: false
+      allow_owner_combat: true
+  
+  # === PER-WORLD SETTINGS ===
+  # Per-world settings (overrides global enabled setting)
+  worlds:
+    world: true          # Enable in overworld
+    world_nether: false  # Disable in nether (allow PvP)
+    world_the_end: true  # Enable in end
+    pvp_world: false     # Disable in dedicated PvP world
+    minigames: false     # Disable in minigames world
+    # Add more worlds as needed
+  
+  # === PERFORMANCE OPTIMIZATION ===
+  # Advanced: Cache settings for performance optimization
+  cache:
+    # Enable caching of claim lookups (recommended for large servers)
+    enabled: true
+    # How long to cache claim results (in milliseconds)
+    ttl: 10000
+    # Maximum cache size before cleanup
+    max_size: 1000
+    # Clean cache every X milliseconds
+    cleanup_interval: 30000
+  
+  # === INTEGRATION OPTIONS ===
+  # Integration with other protection plugins
+  integration:
+    # Respect WorldGuard regions (if both are present)
+    respect_worldguard: true
+    # Respect GriefPrevention claims (if both are present)  
+    respect_griefprevention: true
+    # Priority when multiple protection plugins are active
+    # Higher number = higher priority
+    priority: 10

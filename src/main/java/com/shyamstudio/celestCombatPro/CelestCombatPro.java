@@ -8,9 +8,11 @@ import com.shyamstudio.celestCombatPro.commands.CommandManager;
 import com.shyamstudio.celestCombatPro.configs.TimeFormatter;
 import com.shyamstudio.celestCombatPro.messages.MessageManager;
 import com.shyamstudio.celestCombatPro.listeners.CombatListeners;
+import com.shyamstudio.celestCombatPro.listeners.DynamicEventHandler;
 import com.shyamstudio.celestCombatPro.listeners.EnderPearlListener;
 import com.shyamstudio.celestCombatPro.hooks.protection.WorldGuardHook;
 import com.shyamstudio.celestCombatPro.hooks.protection.GriefPreventionHook;
+import com.shyamstudio.celestCombatPro.hooks.protection.UXMClaimsHook;
 import com.shyamstudio.celestCombatPro.hooks.placeholders.CelestCombatExpansion;
 import com.shyamstudio.celestCombatPro.listeners.ItemRestrictionListener;
 import com.shyamstudio.celestCombatPro.listeners.TridentListener;
@@ -45,11 +47,14 @@ public final class CelestCombatPro extends JavaPlugin {
   private NewbieProtectionManager newbieProtectionManager;
   private WorldGuardHook worldGuardHook;
   private GriefPreventionHook griefPreventionHook;
+  private UXMClaimsHook uxmClaimsHook;
   private CombatAPIImpl combatAPI;
   private CelestCombatExpansion placeholderExpansion;
+  private DynamicEventHandler dynamicEventHandler;
 
   public static boolean hasWorldGuard = false;
   public static boolean hasGriefPrevention = false;
+  public static boolean hasUXMClaims = false;
   public static boolean hasPlaceholderAPI = false;
 
   @Override
@@ -70,15 +75,24 @@ public final class CelestCombatPro extends JavaPlugin {
     combatManager = new CombatManager(this);
     killRewardManager = new KillRewardManager(this);
     newbieProtectionManager = new NewbieProtectionManager(this);
+    
+    // Initialize dynamic event handler system
+    dynamicEventHandler = new DynamicEventHandler(this);
+    dynamicEventHandler.registerHandlers();
+    
+    // Register static event handlers (ones that don't need configurable priorities)
     combatListeners = new CombatListeners(this);
+    // Note: Some methods in combatListeners are now registered dynamically
     getServer().getPluginManager().registerEvents(combatListeners, this);
 
     enderPearlListener = new EnderPearlListener(this, combatManager);
+    // Note: Some methods in enderPearlListener are now registered dynamically
     getServer().getPluginManager().registerEvents(enderPearlListener, this);
 
     tridentListener = new TridentListener(this, combatManager);
     getServer().getPluginManager().registerEvents(tridentListener, this);
 
+    // Note: Some methods in ItemRestrictionListener are now registered dynamically
     getServer().getPluginManager().registerEvents(new ItemRestrictionListener(this, combatManager), this);
 
     // WorldGuard integration
@@ -97,6 +111,15 @@ public final class CelestCombatPro extends JavaPlugin {
       debug("GriefPrevention claim protection enabled");
     } else if(hasGriefPrevention) {
       getLogger().info("Found GriefPrevention but claim protection is disabled in config.");
+    }
+
+    // UXM Claims integration
+    if (hasUXMClaims && getConfig().getBoolean("uxm_claims_protection.enabled", true)) {
+      uxmClaimsHook = new UXMClaimsHook(this, combatManager);
+      getServer().getPluginManager().registerEvents(uxmClaimsHook, this);
+      debug("UXM Claims protection enabled");
+    } else if(hasUXMClaims) {
+      getLogger().info("Found UXM Claims but claim protection is disabled in config.");
     }
 
     commandManager = new CommandManager(this);
@@ -126,6 +149,11 @@ public final class CelestCombatPro extends JavaPlugin {
 
   @Override
   public void onDisable() {
+    // Unregister dynamic event handlers first
+    if (dynamicEventHandler != null) {
+      dynamicEventHandler.unregisterHandlers();
+    }
+    
     if (combatManager != null) {
       combatManager.shutdown();
     }
@@ -148,6 +176,10 @@ public final class CelestCombatPro extends JavaPlugin {
 
     if (griefPreventionHook != null) {
       griefPreventionHook.cleanup();
+    }
+
+    if (uxmClaimsHook != null) {
+      uxmClaimsHook.cleanup();
     }
 
     if (killRewardManager != null) {
@@ -180,6 +212,11 @@ public final class CelestCombatPro extends JavaPlugin {
     hasGriefPrevention = isPluginEnabled("GriefPrevention") && isGriefPreventionAPIAvailable();
     if (hasGriefPrevention) {
       getLogger().info("GriefPrevention integration enabled successfully!");
+    }
+
+    hasUXMClaims = isPluginEnabled("UXMClaims");
+    if (hasUXMClaims) {
+      getLogger().info("UXM Claims integration enabled successfully!");
     }
   }
 
@@ -232,6 +269,19 @@ public final class CelestCombatPro extends JavaPlugin {
   }
 
   public void reload() {
+    // Reload configuration first
+    reloadConfig();
+    
+    // Reload combat manager (which includes event priority manager)
+    if (combatManager != null) {
+      combatManager.reloadConfig();
+    }
+    
+    // Re-register dynamic event handlers with new priorities
+    if (dynamicEventHandler != null) {
+      dynamicEventHandler.registerHandlers();
+    }
+    
     if (messageManager != null) {
       messageManager.reload();
     }
@@ -243,9 +293,15 @@ public final class CelestCombatPro extends JavaPlugin {
     if (griefPreventionHook != null) {
       griefPreventionHook.cleanup();
     }
+    
+    debug("Plugin reloaded with new event priorities");
   }
 
   public MessageManager getMessageService() {
     return messageManager;
+  }
+  
+  public DynamicEventHandler getDynamicEventHandler() {
+    return dynamicEventHandler;
   }
 }

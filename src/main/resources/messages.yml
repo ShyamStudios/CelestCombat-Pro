@@ -253,3 +253,24 @@ newbie_protection_not_protected:
 newbie_protection_check_protected:
   message: "&#4CAF50%player% has newbie protection with %time% remaining"
   sound: block.note_block.pling
+# ------------------------------------------------------
+#              UXM Claims Protection Messages
+# ------------------------------------------------------
+uxm_claims_combat_entry_blocked:
+  message: "&cYou cannot enter claimed areas while in combat!"
+  sound: block.note_block.pling
+
+uxm_claims_combat_blocked:
+  message: "&cYou cannot fight in claimed areas!"
+  sound: block.note_block.pling
+
+uxm_claims_teleport_blocked:
+  message: "&cYou cannot teleport into claimed areas while in combat!"
+  sound: block.note_block.pling
+
+# ------------------------------------------------------
+#              Ender Pearl Fix Messages
+# ------------------------------------------------------
+enderpearl_glitch_prevented:
+  message: "&cEnder pearl teleportation blocked - glitch detected!"
+  sound: block.note_block.pling
