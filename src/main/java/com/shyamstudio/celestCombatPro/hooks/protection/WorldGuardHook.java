@@ -327,6 +327,10 @@ public class WorldGuardHook implements Listener {
 
         if (playerBarrierSet != null && containsBlockLocation(playerBarrierSet, blockLoc)) {
             event.setCancelled(true);
+            
+            // Push player back if they're trying to interact with barrier
+            pushPlayerAwayFromBarrier(player, blockLoc);
+            
             Scheduler.runTaskLater(() -> refreshBarrierBlock(blockLoc, player), 1L);
         }
     }
@@ -469,19 +473,107 @@ public class WorldGuardHook implements Listener {
             for (int z = -radius; z <= radius; z++) {
                 if (x * x + z * z > radiusSquared) continue;
 
-                for (int y = -1; y <= 2; y++) {
-                    checkLoc.setX(baseX + x);
-                    checkLoc.setY(baseY + y);
-                    checkLoc.setZ(baseZ + z);
-
-                    if (isBorderLocation(checkLoc)) {
-                        barrierLocations.add(normalizeToBlockLocation(checkLoc.clone()));
+                // Check if this X,Z position is a border at player's Y level
+                checkLoc.setX(baseX + x);
+                checkLoc.setY(baseY);
+                checkLoc.setZ(baseZ + z);
+                
+                if (isBorderLocation(checkLoc)) {
+                    // This is a border location - now extend barriers vertically
+                    // Check if there's open sky above
+                    boolean hasOpenSky = true;
+                    for (int y = baseY + 1; y <= world.getMaxHeight(); y++) {
+                        Block block = world.getBlockAt(baseX + x, y, baseZ + z);
+                        if (block.getType().isSolid()) {
+                            hasOpenSky = false;
+                            break;
+                        }
+                    }
+                    
+                    if (hasOpenSky) {
+                        // Extend barrier through entire region height (Y-min to Y-max)
+                        // Get region bounds for this location
+                        int minY = getRegionMinY(checkLoc);
+                        int maxY = getRegionMaxY(checkLoc);
+                        
+                        // Create barriers from region min to max, but limit to configured height around player
+                        int startY = Math.max(minY, baseY - 1);
+                        int endY = Math.min(maxY, baseY + barrierHeight);
+                        
+                        for (int y = startY; y <= endY; y++) {
+                            Location barrierLoc = new Location(world, baseX + x, y, baseZ + z);
+                            barrierLocations.add(normalizeToBlockLocation(barrierLoc));
+                        }
+                    } else {
+                        // No open sky - use standard height
+                        for (int y = -1; y <= barrierHeight; y++) {
+                            checkLoc.setY(baseY + y);
+                            barrierLocations.add(normalizeToBlockLocation(checkLoc.clone()));
+                        }
                     }
                 }
             }
         }
 
         return barrierLocations;
+    }
+    
+    private int getRegionMinY(Location loc) {
+        try {
+            String worldName = loc.getWorld().getName();
+            RegionManager regionManager = regionManagerCache.get(worldName);
+            if (regionManager == null) {
+                regionManager = WorldGuard.getInstance().getPlatform()
+                        .getRegionContainer().get(BukkitAdapter.adapt(loc.getWorld()));
+                if (regionManager != null) {
+                    regionManagerCache.put(worldName, regionManager);
+                }
+            }
+            
+            if (regionManager != null) {
+                BlockVector3 pos = BlockVector3.at(loc.getX(), loc.getY(), loc.getZ());
+                ApplicableRegionSet regions = regionManager.getApplicableRegions(pos);
+                
+                if (!regions.getRegions().isEmpty()) {
+                    return regions.getRegions().stream()
+                            .mapToInt(region -> region.getMinimumPoint().y())
+                            .min()
+                            .orElse(loc.getWorld().getMinHeight());
+                }
+            }
+        } catch (Exception e) {
+            plugin.debug("Error getting region min Y: " + e.getMessage());
+        }
+        return loc.getWorld().getMinHeight();
+    }
+    
+    private int getRegionMaxY(Location loc) {
+        try {
+            String worldName = loc.getWorld().getName();
+            RegionManager regionManager = regionManagerCache.get(worldName);
+            if (regionManager == null) {
+                regionManager = WorldGuard.getInstance().getPlatform()
+                        .getRegionContainer().get(BukkitAdapter.adapt(loc.getWorld()));
+                if (regionManager != null) {
+                    regionManagerCache.put(worldName, regionManager);
+                }
+            }
+            
+            if (regionManager != null) {
+                BlockVector3 pos = BlockVector3.at(loc.getX(), loc.getY(), loc.getZ());
+                ApplicableRegionSet regions = regionManager.getApplicableRegions(pos);
+                
+                if (!regions.getRegions().isEmpty()) {
+                    return regions.getRegions().stream()
+                            .mapToInt(region -> region.getMaximumPoint().y())
+                            .max()
+                            .orElse(loc.getWorld().getMaxHeight());
+                }
+            }
+        } catch (Exception e) {
+            plugin.debug("Error getting region max Y: " + e.getMessage());
+        }
+        return loc.getWorld().getMaxHeight();
     }
 
     private boolean isBorderLocation(Location loc) {
@@ -509,6 +601,42 @@ public class WorldGuardHook implements Listener {
         originalBlocks.put(normalizedLoc, block.getType());
         barrierViewers.computeIfAbsent(normalizedLoc, k -> new HashSet<>()).add(player.getUniqueId());
         player.sendBlockChange(normalizedLoc, barrierMaterial.createBlockData());
+        
+        // Check if player is inside or very close to this barrier block
+        if (isPlayerInsideBarrier(player, normalizedLoc)) {
+            pushPlayerAwayFromBarrier(player, normalizedLoc);
+        }
+    }
+    
+    private boolean isPlayerInsideBarrier(Player player, Location barrierLoc) {
+        Location playerLoc = player.getLocation();
+        
+        // Check if player's hitbox intersects with the barrier block
+        double distance = playerLoc.distance(barrierLoc.clone().add(0.5, 0.5, 0.5));
+        return distance < 1.5; // Player is inside or very close to barrier
+    }
+    
+    private void pushPlayerAwayFromBarrier(Player player, Location barrierLoc) {
+        Location playerLoc = player.getLocation();
+        Location barrierCenter = barrierLoc.clone().add(0.5, 0, 0.5);
+        
+        // Calculate direction away from barrier
+        Vector direction = playerLoc.toVector().subtract(barrierCenter.toVector()).normalize();
+        
+        // If player is exactly on the barrier, push them in a default direction
+        if (direction.lengthSquared() < 0.01) {
+            direction = new Vector(1, 0, 0);
+        }
+        
+        // Apply horizontal push force (don't push vertically to avoid launching players)
+        direction.setY(0);
+        direction.normalize().multiply(pushBackForce);
+        
+        try {
+            player.setVelocity(direction);
+        } catch (Exception e) {
+            plugin.debug("Failed to push player away from barrier: " + e.getMessage());
+        }
     }
 
     private void removeBarrierBlock(Location loc, Player player) {

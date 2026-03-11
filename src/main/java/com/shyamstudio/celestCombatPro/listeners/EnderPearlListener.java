@@ -305,36 +305,9 @@ public class EnderPearlListener implements Listener {
     }
 
     private void startPearlCountdown(Player player) {
-        UUID playerUUID = player.getUniqueId();
-
-        // Cancel existing countdown task if any
-        Scheduler.Task existingTask = pearlCountdownTasks.get(playerUUID);
-        if (existingTask != null) {
-            existingTask.cancel();
-        }
-
-        // Start new countdown task
-        Scheduler.Task countdownTask = Scheduler.runTaskTimer(() -> {
-            if (!player.isOnline()) {
-                pearlCountdownTasks.remove(playerUUID);
-                return;
-            }
-
-            int remainingTime = combatManager.getRemainingEnderPearlCooldown(player);
-            if (remainingTime <= 0) {
-                pearlCountdownTasks.remove(playerUUID);
-                return;
-            }
-
-            // Send action bar message
-            Map<String, String> placeholders = new HashMap<>();
-            placeholders.put("player", player.getName());
-            placeholders.put("time", String.valueOf(remainingTime));
-            plugin.getMessageService().sendMessage(player, "pearl_only_countdown", placeholders);
-
-        }, 0L, 20L); // Run every second
-
-        pearlCountdownTasks.put(playerUUID, countdownTask);
+        // NOTE: Cooldown display is now handled by CombatManager.updatePlayerCountdown()
+        // to avoid duplicate messages. This method is kept for future use if needed.
+        // The CombatManager already displays pearl cooldowns in its global countdown timer.
     }
     
     public void shutdown() {
