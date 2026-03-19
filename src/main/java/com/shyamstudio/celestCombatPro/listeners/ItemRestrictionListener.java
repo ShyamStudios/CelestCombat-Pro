@@ -2,7 +2,6 @@ package com.shyamstudio.celestCombatPro.listeners;
 
 import com.shyamstudio.celestCombatPro.CelestCombatPro;
 import com.shyamstudio.celestCombatPro.combat.CombatManager;
-import lombok.RequiredArgsConstructor;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -15,14 +14,30 @@ import org.bukkit.event.player.PlayerToggleFlightEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-@RequiredArgsConstructor
 public class ItemRestrictionListener implements Listener {
+
     private final CelestCombatPro plugin;
     private final CombatManager combatManager;
+
+    private boolean itemRestrictions;
+    private List<String> disabledItems = Collections.emptyList();
+
+    public ItemRestrictionListener(CelestCombatPro plugin,  CombatManager combatManager) {
+        this.plugin = plugin;
+        this.combatManager = combatManager;
+
+        this.reloadConfig();
+    }
+
+    public void reloadConfig() {
+        this.itemRestrictions = plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true);
+        this.disabledItems = plugin.getConfig().getStringList("combat.item_disabled.items");
+    }
 
     public static String formatItemName(Material material) {
         if (material == null) {
@@ -47,7 +62,7 @@ public class ItemRestrictionListener implements Listener {
     // NOTE: This method is now registered dynamically with configurable priority
     public void onPlayerItemConsume(PlayerItemConsumeEvent event) {
         // Check if item restrictions are enabled
-        if (!plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true)) {
+        if (!itemRestrictions) {
             return;
         }
 
@@ -55,10 +70,8 @@ public class ItemRestrictionListener implements Listener {
         ItemStack item = event.getItem();
 
         if (combatManager.isInCombat(player)) {
-            List<String> disabledItems = plugin.getConfig().getStringList("combat.item_restrictions.disabled_items");
-
             // Check if the consumed item is in the disabled items list
-            if (isItemDisabled(item.getType(), disabledItems)) {
+            if (isItemDisabled(item.getType())) {
                 event.setCancelled(true);
 
                 Map<String, String> placeholders = new HashMap<>();
@@ -72,15 +85,13 @@ public class ItemRestrictionListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPlayerMoveEvent(PlayerMoveEvent event) {
         // Check if item restrictions are enabled
-        if (!plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true)) {
+        if (!itemRestrictions) {
             return;
         }
 
         Player player = event.getPlayer();
 
         if (combatManager.isInCombat(player)) {
-            List<String> disabledItems = plugin.getConfig().getStringList("combat.item_restrictions.disabled_items");
-
             if (disabledItems.contains("ELYTRA") && player.isGliding()) {
                 player.setGliding(false);
 
@@ -95,22 +106,18 @@ public class ItemRestrictionListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onInventoryClick(InventoryClickEvent event) {
         // Check if item restrictions are enabled
-        if (!plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true)) {
+        if (!itemRestrictions) {
             return;
         }
 
-        if (!(event.getWhoClicked() instanceof Player)) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
             return;
         }
-
-        Player player = (Player) event.getWhoClicked();
 
         if (!combatManager.isInCombat(player)) {
             return;
         }
 
-        List<String> disabledItems = plugin.getConfig().getStringList("combat.item_restrictions.disabled_items");
-        
         // Check if ELYTRA is disabled
         if (!disabledItems.contains("ELYTRA")) {
             return;
@@ -121,8 +128,7 @@ public class ItemRestrictionListener implements Listener {
 
         // Prevent equipping Elytra to chestplate slot
         if (event.getSlot() == 38 && event.getSlotType() == org.bukkit.event.inventory.InventoryType.SlotType.ARMOR) {
-            if ((clickedItem != null && clickedItem.getType() == Material.ELYTRA) ||
-                (cursorItem != null && cursorItem.getType() == Material.ELYTRA)) {
+            if (clickedItem != null && clickedItem.getType() == Material.ELYTRA || cursorItem.getType() == Material.ELYTRA) {
                 event.setCancelled(true);
                 
                 Map<String, String> placeholders = new HashMap<>();
@@ -150,7 +156,7 @@ public class ItemRestrictionListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPlayerToggleFlight(PlayerToggleFlightEvent event) {
         // Check if item restrictions are enabled
-        if (!plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true)) {
+        if (!itemRestrictions) {
             return;
         }
 
@@ -160,8 +166,6 @@ public class ItemRestrictionListener implements Listener {
             return;
         }
 
-        List<String> disabledItems = plugin.getConfig().getStringList("combat.item_restrictions.disabled_items");
-        
         // Check if ELYTRA is disabled and player is trying to start gliding
         if (disabledItems.contains("ELYTRA") && event.isFlying() && 
             player.getInventory().getChestplate() != null && 
@@ -181,11 +185,9 @@ public class ItemRestrictionListener implements Listener {
      */
     public void handleCombatStart(Player player) {
         // Check if item restrictions are enabled
-        if (!plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true)) {
+        if (!itemRestrictions) {
             return;
         }
-
-        List<String> disabledItems = plugin.getConfig().getStringList("combat.item_restrictions.disabled_items");
         
         if (!disabledItems.contains("ELYTRA")) {
             return;
@@ -219,7 +221,7 @@ public class ItemRestrictionListener implements Listener {
         }
     }
 
-    private boolean isItemDisabled(Material itemType, List<String> disabledItems) {
+    private boolean isItemDisabled(Material itemType) {
         return disabledItems.stream()
                 .anyMatch(disabledItem ->
                         itemType.name().equalsIgnoreCase(disabledItem) ||
