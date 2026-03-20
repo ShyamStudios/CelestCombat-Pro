@@ -182,6 +182,11 @@ public class EnderPearlListener implements Listener {
         Player player = event.getPlayer();
         Location from = event.getFrom();
 
+        if (!from.getWorld().equals(to.getWorld())) {
+            event.setCancelled(true);
+            return;
+        }
+
         if (shouldPreventTeleport(player, from, to)) {
             event.setCancelled(true);
 
@@ -205,7 +210,6 @@ public class EnderPearlListener implements Listener {
     // Teleport validation — each check is ordered cheapest → most expensive
     // -------------------------------------------------------------------------
     private boolean shouldPreventTeleport(Player player, Location from, Location to) {
-
         // 1. Micro-teleport — single distance calculation, no allocations
         if (combatManager.shouldPreventMicroTeleport()) {
             double dist = from.distanceSquared(to); // avoid sqrt
