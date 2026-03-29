@@ -36,7 +36,7 @@ public class ItemRestrictionListener implements Listener {
 
     public void reloadConfig() {
         this.itemRestrictions = plugin.getConfig().getBoolean("combat.item_restrictions.enabled", true);
-        this.disabledItems = plugin.getConfig().getStringList("combat.item_disabled.items");
+        this.disabledItems = plugin.getConfig().getStringList("combat.item_restrictions.disabled_items");
     }
 
     public static String formatItemName(Material material) {
