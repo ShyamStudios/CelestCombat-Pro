@@ -65,6 +65,7 @@ public class WorldGuardHook implements Listener {
     private volatile Material barrierMaterial;
     private volatile double pushBackForce;
     private volatile long borderCacheRebuildInterval; // ms
+    private volatile boolean useChunkCache; // chunk-level optimization
     // =========================================================================
     // Constructor
     // =========================================================================
@@ -86,9 +87,11 @@ public class WorldGuardHook implements Listener {
         this.barrierMaterial = loadBarrierMaterial();
         this.pushBackForce = plugin.getConfig().getDouble("safezone_protection.push_back_force", 0.6);
         this.borderCacheRebuildInterval = plugin.getConfig().getLong("safezone_protection.border_cache_rebuild_interval_ms", 3_000);
+        this.useChunkCache = plugin.getConfig().getBoolean("safezone_protection.use_chunk_cache", false);
 
         borderCaches.clear();
-        plugin.debug("WorldGuard safezone protection reloaded. Global: " + globalEnabled);
+        plugin.debug("WorldGuard safezone protection reloaded. Global: " + globalEnabled 
+                + ", Chunk Cache: " + useChunkCache);
     }
 
     @SuppressWarnings("ConstantConditions")
@@ -335,6 +338,9 @@ public class WorldGuardHook implements Listener {
 
         BorderCache cache = getCacheForWorld(world);
         Set<BlockPos> result = new HashSet<>();
+        
+        plugin.debug("[Barrier] Searching for barriers near " + player.getName() 
+                + " at (" + baseX + ", " + baseY + ", " + baseZ + "), radius=" + radius);
 
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
@@ -345,6 +351,8 @@ public class WorldGuardHook implements Listener {
 
                 // Pure HashSet.contains() — no WG call
                 if (!cache.isBorder(cx, baseY, cz)) continue;
+                
+                plugin.debug("[Barrier] Found border at (" + cx + ", " + baseY + ", " + cz + ")");
 
                 // Sky check — capped at SKY_CHECK_LIMIT
                 boolean hasOpenSky = true;
@@ -372,6 +380,8 @@ public class WorldGuardHook implements Listener {
                 }
             }
         }
+        
+        plugin.debug("[Barrier] Found " + result.size() + " barrier blocks for " + player.getName());
         return result;
     }
 
@@ -704,6 +714,7 @@ public class WorldGuardHook implements Listener {
          * 4. Atomically swap the snapshot so readers always see a consistent view.
          */
         void rebuild() {
+            long startTime = System.nanoTime();
             try {
                 RegionManager rm = WorldGuard.getInstance().getPlatform()
                         .getRegionContainer().get(BukkitAdapter.adapt(world));
@@ -712,15 +723,32 @@ public class WorldGuardHook implements Listener {
                 RegionQuery query = WorldGuard.getInstance()
                         .getPlatform().getRegionContainer().createQuery();
 
-                Set<BlockPos> newSafeZone = new HashSet<>();
+                Set<BlockPos> newSafeZone = new HashSet<>(10000);
                 Map<Long, int[]> newBounds = new HashMap<>();
+                
+                // 🔥 CACHE: Avoid querying same column/chunk multiple times when regions overlap
+                Map<Long, Boolean> columnResultCache = new HashMap<>(16384);
+                Map<Long, Boolean> chunkResultCache = useChunkCache ? new HashMap<>(1024) : null;
 
                 int worldMinY = world.getMinHeight();
                 int worldMaxY = world.getMaxHeight();
 
+                // 🔥 REUSE Location object — zero allocations in loop
+                Location bukkitLoc = new Location(world, 0, 0, 0);
+
                 for (ProtectedRegion region : rm.getRegions().values()) {
                     BlockVector3 min = region.getMinimumPoint();
                     BlockVector3 max = region.getMaximumPoint();
+
+                    // Skip huge regions with warning (prevents silent protection failures)
+                    long regionArea = (long) (max.x() - min.x() + 1) * (max.z() - min.z() + 1);
+                    if (regionArea > 500_000) {
+                        plugin.getLogger().warning("[BorderCache] Skipping huge region '" 
+                                + region.getId() + "' (" + regionArea + " blocks). "
+                                + "Protection may not work correctly in this region! "
+                                + "Consider splitting this region or increasing the threshold.");
+                        continue;
+                    }
 
                     int rMinY = Math.max(min.y(), worldMinY);
                     int rMaxY = Math.min(max.y(), worldMaxY);
@@ -728,13 +756,57 @@ public class WorldGuardHook implements Listener {
 
                     for (int x = min.x(); x <= max.x(); x++) {
                         for (int z = min.z(); z <= max.z(); z++) {
-                            com.sk89q.worldedit.util.Location wgLoc =
-                                    BukkitAdapter.adapt(new Location(world, x, cy, z));
-                            if (query.testState(wgLoc, null, Flags.PVP)) continue; // PVP allowed here
+                            long xzKey = Snapshot.xzKey(x, z);
+                            
+                            // 🔥 CHECK CACHE FIRST — eliminates redundant WG queries for overlapping regions
+                            Boolean cached = columnResultCache.get(xzKey);
+                            boolean isSafe;
+                            
+                            if (cached != null) {
+                                isSafe = cached;
+                            } else {
+                                // 🔥 CHUNK-LEVEL CACHE (optional extreme optimization)
+                                if (useChunkCache && chunkResultCache != null) {
+                                    int chunkX = x >> 4;
+                                    int chunkZ = z >> 4;
+                                    long chunkKey = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+                                    
+                                    Boolean chunkCached = chunkResultCache.get(chunkKey);
+                                    if (chunkCached != null) {
+                                        isSafe = chunkCached;
+                                        columnResultCache.put(xzKey, isSafe);
+                                    } else {
+                                        // Query WG once per chunk
+                                        bukkitLoc.setX(x);
+                                        bukkitLoc.setY(cy);
+                                        bukkitLoc.setZ(z);
+                                        isSafe = !query.testState(BukkitAdapter.adapt(bukkitLoc), null, Flags.PVP);
+                                        chunkResultCache.put(chunkKey, isSafe);
+                                        columnResultCache.put(xzKey, isSafe);
+                                    }
+                                } else {
+                                    // 🔥 REUSE Location (NO allocation per iteration)
+                                    bukkitLoc.setX(x);
+                                    bukkitLoc.setY(cy);
+                                    bukkitLoc.setZ(z);
+
+                                    // 🔥 ONLY 1 WG QUERY PER UNIQUE COLUMN (respects overlaps, priority, inheritance)
+                                    boolean pvpAllowed = query.testState(BukkitAdapter.adapt(bukkitLoc), null, Flags.PVP);
+                                    isSafe = !pvpAllowed; // Safe zone = PVP NOT allowed
+                                    columnResultCache.put(xzKey, isSafe);
+                                    
+                                    // Debug first few queries
+                                    if (columnResultCache.size() <= 5) {
+                                        plugin.debug("[BorderCache] Column (" + x + ", " + z + "): PVP=" 
+                                                + pvpAllowed + ", isSafe=" + isSafe);
+                                    }
+                                }
+                            }
+                            
+                            if (!isSafe) continue; // PVP allowed here
 
                             newSafeZone.add(BlockPos.of(world, x, 0, z));
 
-                            long xzKey = Snapshot.xzKey(x, z);
                             int[] existing = newBounds.get(xzKey);
                             if (existing == null) {
                                 newBounds.put(xzKey, new int[]{rMinY, rMaxY});
@@ -761,6 +833,9 @@ public class WorldGuardHook implements Listener {
                         }
                     }
                 }
+                
+                plugin.debug("[BorderCache] Border detection: " + newBorder.size() 
+                        + " border columns from " + newSafeZone.size() + " safe columns");
 
                 snapshot.set(new Snapshot(
                         Collections.unmodifiableSet(newSafeZone),
@@ -768,9 +843,44 @@ public class WorldGuardHook implements Listener {
                         Collections.unmodifiableMap(newBounds)));
 
                 lastRebuild = System.currentTimeMillis();
+                
+                // Calculate cache effectiveness and rebuild time
+                long rebuildMs = (System.nanoTime() - startTime) / 1_000_000;
+                int totalRegionBlocks = 0;
+                for (ProtectedRegion region : rm.getRegions().values()) {
+                    BlockVector3 min = region.getMinimumPoint();
+                    BlockVector3 max = region.getMaximumPoint();
+                    long area = (long) (max.x() - min.x() + 1) * (max.z() - min.z() + 1);
+                    if (area <= 500_000) totalRegionBlocks += area;
+                }
+                int uniqueQueries = (useChunkCache && chunkResultCache != null) 
+                        ? chunkResultCache.size() 
+                        : columnResultCache.size();
+                int savedQueries = totalRegionBlocks - uniqueQueries;
+                double savePercent = totalRegionBlocks > 0 
+                        ? (savedQueries * 100.0 / totalRegionBlocks) 
+                        : 0;
+                
+                // Performance warnings
+                if (rebuildMs > 100) {
+                    plugin.getLogger().warning("[BorderCache] Slow rebuild detected! Took " 
+                            + rebuildMs + "ms for world '" + world.getName() 
+                            + "'. Consider increasing rebuild interval or splitting large regions.");
+                }
+                
+                if (savePercent < 50 && totalRegionBlocks > 1000) {
+                    plugin.getLogger().warning("[BorderCache] Low cache efficiency (" 
+                            + String.format("%.1f", savePercent) + "%) in world '" + world.getName() 
+                            + "'. This may indicate excessive region overlap or fragmentation.");
+                }
+                
                 plugin.debug("[BorderCache] Rebuilt for world '" + world.getName()
-                        + "' — " + newSafeZone.size() + " safe columns, "
-                        + newBorder.size() + " border columns.");
+                        + "' in " + rebuildMs + "ms — " 
+                        + newSafeZone.size() + " safe columns, "
+                        + newBorder.size() + " border columns. "
+                        + (useChunkCache ? "Chunk cache" : "Column cache") + " saved " 
+                        + savedQueries + " WG queries (" + String.format("%.1f", savePercent) + "%) — "
+                        + uniqueQueries + " unique / " + totalRegionBlocks + " total blocks.");
 
             } catch (Exception e) {
                 plugin.getLogger().warning("[BorderCache] Rebuild failed for '"

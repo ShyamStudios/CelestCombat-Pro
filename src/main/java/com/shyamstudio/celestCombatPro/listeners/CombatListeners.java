@@ -169,8 +169,57 @@ public class CombatListeners implements Listener {
         if (CelestCombatAPI.getCombatAPI().isInCombat(player)) {
             playerLoggedOutInCombat.put(player.getUniqueId(), true);
 
-            // Punish the player for combat logging using API
-            CelestCombatAPI.getCombatAPI().punishCombatLogout(player);
+            // Check if combat logout punishment is enabled
+            if (plugin.getConfig().getBoolean("combat.combat_logout.enabled", true)) {
+                // Get the opponent
+                Player opponent = CelestCombatAPI.getCombatAPI().getCombatOpponent(player);
+                
+                // Kill the player if configured
+                if (plugin.getConfig().getBoolean("combat.combat_logout.kill_player", true)) {
+                    CelestCombatAPI.getCombatAPI().punishCombatLogout(player);
+                }
+                
+                // Execute punishment commands
+                List<String> punishmentCommands = plugin.getConfig().getStringList("combat.combat_logout.punishment_commands");
+                for (String cmd : punishmentCommands) {
+                    String finalCmd = cmd
+                            .replace("%player%", player.getName())
+                            .replace("%attacker%", opponent != null ? opponent.getName() : "Unknown");
+                    plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), finalCmd);
+                }
+                
+                // Reward the attacker if configured and opponent exists
+                if (plugin.getConfig().getBoolean("combat.combat_logout.reward_attacker", true) && opponent != null && opponent.isOnline()) {
+                    // Give kill rewards
+                    killRewardManager.giveKillReward(opponent, player);
+                    
+                    // Execute attacker reward commands
+                    List<String> rewardCommands = plugin.getConfig().getStringList("combat.combat_logout.attacker_reward_commands");
+                    for (String cmd : rewardCommands) {
+                        String finalCmd = cmd
+                                .replace("%player%", opponent.getName())
+                                .replace("%victim%", player.getName());
+                        plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), finalCmd);
+                    }
+                    
+                    // Send message to attacker
+                    Map<String, String> placeholders = new HashMap<>();
+                    placeholders.put("victim", player.getName());
+                    messageManager.sendMessage(opponent, "combat_logout_attacker_reward", placeholders);
+                    
+                    // Perform death animation
+                    deathAnimationManager.performDeathAnimation(player, opponent);
+                    
+                    // Remove opponent from combat
+                    CelestCombatAPI.getCombatAPI().removeFromCombatSilently(opponent);
+                } else if (opponent == null) {
+                    // No opponent, just perform death animation
+                    deathAnimationManager.performDeathAnimation(player, null);
+                }
+            } else {
+                // Punishment disabled, just punish normally
+                CelestCombatAPI.getCombatAPI().punishCombatLogout(player);
+            }
 
         } else {
             playerLoggedOutInCombat.put(player.getUniqueId(), false);

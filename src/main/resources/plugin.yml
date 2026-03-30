@@ -5,8 +5,9 @@ api-version: '1.21'
 authors: [ RaviRai, Nighter, WeThink ]
 description: A simple combat logging plugins
 folia-supported: true
+load: POSTWORLD
 
-soft-depend:
+softdepend:
   - WorldGuard
   - GriefPrevention
   - UXMClaims

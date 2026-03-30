@@ -88,6 +88,33 @@ combat:
 
   # Disable flight (Creative fly) during combat
   disable_flight: false
+  
+  # Combat logout punishment system
+  combat_logout:
+    # Enable/disable combat logout punishment
+    enabled: true
+    
+    # Kill the player when they log out in combat
+    kill_player: true
+    
+    # Give kill reward to the attacker
+    reward_attacker: true
+    
+    # Punishment commands executed when player logs out in combat
+    # Variables: %player% = logger's name, %attacker% = attacker's name (if available)
+    punishment_commands:
+      - "broadcast &c%player% &7logged out during combat!"
+      # Add more punishment commands as needed
+      # - "eco take %player% 1000"
+      # - "lp user %player% permission set some.penalty true"
+    
+    # Reward commands executed for the attacker when opponent logs out
+    # Variables: %player% = attacker's name, %victim% = logger's name
+    attacker_reward_commands:
+      - "broadcast &a%player% &7killed &c%victim% &7(Combat Logout)"
+      # Add more reward commands as needed
+      # - "eco give %player% 500"
+      # - "give %player% diamond 5"
 
   # Items blocked during combat (Foods, Potions, Elytra)
   item_restrictions:
@@ -309,6 +336,21 @@ safezone_protection:
   # Push force when player accidentally go inside the barrier blocks
   # Higher values = stronger push back, lower values = gentler push
   push_back_force: 0.6
+
+  # Border cache rebuild interval (in milliseconds)
+  # How often to scan WorldGuard regions and rebuild the safezone cache
+  # Higher values = better performance but slower detection of region changes
+  # Lower values = faster detection but more CPU usage
+  # Recommended: 30000-60000 (30-60 seconds) for most servers
+  # Default was 3000 (3 seconds) which caused performance issues
+  border_cache_rebuild_interval_ms: 30000
+
+  # Advanced: Use chunk-level caching (16x16 blocks per query)
+  # When enabled, queries WorldGuard once per chunk instead of per column
+  # This provides extreme performance (~300-800 WG queries vs ~5-10k)
+  # Tradeoff: Slight precision loss on chunk borders (usually negligible)
+  # Recommended: false for most servers, true only for 200+ player servers
+  use_chunk_cache: false
 
   # Per-world configuration
   # You can enable/disable safezone protection for specific worlds

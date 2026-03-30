@@ -206,9 +206,21 @@ public final class CelestCombatPro extends JavaPlugin {
   }
 
   private void checkProtectionPlugins() {
-    hasWorldGuard = isPluginEnabled("WorldGuard") && isWorldGuardAPIAvailable();
+    boolean wgPluginFound = isPluginEnabled("WorldGuard");
+    boolean wgAPIAvailable = isWorldGuardAPIAvailable();
+    
+    getLogger().info("[Protection Check] WorldGuard plugin found: " + wgPluginFound);
+    getLogger().info("[Protection Check] WorldGuard API available: " + wgAPIAvailable);
+    
+    hasWorldGuard = wgPluginFound && wgAPIAvailable;
     if (hasWorldGuard) {
       getLogger().info("WorldGuard integration enabled successfully!");
+    } else {
+      if (!wgPluginFound) {
+        getLogger().warning("WorldGuard plugin not found or not enabled!");
+      } else if (!wgAPIAvailable) {
+        getLogger().warning("WorldGuard plugin found but API is not available!");
+      }
     }
 
     hasGriefPrevention = isPluginEnabled("GriefPrevention") && isGriefPreventionAPIAvailable();
@@ -230,8 +242,18 @@ public final class CelestCombatPro extends JavaPlugin {
   private boolean isWorldGuardAPIAvailable() {
     try {
       Class.forName("com.sk89q.worldguard.WorldGuard");
-      return WorldGuard.getInstance() != null;
-    } catch (ClassNotFoundException | NoClassDefFoundError e) {
+      WorldGuard wg = WorldGuard.getInstance();
+      getLogger().info("[WorldGuard API] WorldGuard.getInstance() = " + (wg != null ? "SUCCESS" : "NULL"));
+      return wg != null;
+    } catch (ClassNotFoundException e) {
+      getLogger().warning("[WorldGuard API] ClassNotFoundException: " + e.getMessage());
+      return false;
+    } catch (NoClassDefFoundError e) {
+      getLogger().warning("[WorldGuard API] NoClassDefFoundError: " + e.getMessage());
+      return false;
+    } catch (Exception e) {
+      getLogger().warning("[WorldGuard API] Unexpected error: " + e.getMessage());
+      e.printStackTrace();
       return false;
     }
   }

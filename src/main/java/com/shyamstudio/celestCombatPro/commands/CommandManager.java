@@ -31,6 +31,7 @@ public class CommandManager implements CommandExecutor {
         registerCommand("newbieProtection", new NewbieProtectionCommand(plugin));
         registerCommand("eventpriority", new EventPriorityCommand(plugin));
         registerCommand("safeDisconnect", new SafeDisconnectCommand(plugin));
+        registerCommand("debugbarrier", new DebugBarrierCommand(plugin));
 
         // Register main command handler
         PluginCommand mainCommand = plugin.getCommand("celestcombat");

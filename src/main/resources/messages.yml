@@ -19,6 +19,18 @@ player_died_combat_logout:
   subtitle: "&#BF3A49Don't log out during fights!"
   sound: entity.wither.hurt
 
+combat_logout_punishment:
+  message: "&cYou have been punished for logging out during combat!"
+  title: "&#E94E77COMBAT LOGOUT"
+  subtitle: "&#BF3A49You have been killed!"
+  sound: entity.wither.death
+
+combat_logout_attacker_reward:
+  message: "&#4CAF50You killed %victim% who logged out during combat!"
+  title: "&#4CAF50COMBAT KILL"
+  subtitle: "&#66BB6A%victim% logged out!"
+  sound: entity.player.levelup
+
 command_blocked_in_combat:
   message: "&cYou cannot use /%command% while in combat! &#F39C12Wait &#FFFFFF%time%s &#F39C12until combat ends."
   sound: block.anvil.land
