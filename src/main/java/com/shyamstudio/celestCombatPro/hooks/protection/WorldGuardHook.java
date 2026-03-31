@@ -388,14 +388,22 @@ public class WorldGuardHook implements Listener {
 
                 int startY, endY;
                 if (hasOpenSky) {
+                    // Get region bounds for this column
                     int[] bounds = cache.boundsAt(cx, cz);
-                    int minY = bounds != null ? bounds[0] : world.getMinHeight();
-                    int maxY = bounds != null ? bounds[1] : world.getMaxHeight();
-                    startY = Math.max(minY, baseY - 1);
-                    endY = Math.min(maxY, baseY + barrierHeight);
+                    if (bounds != null) {
+                        // Barrier should be from region's minY to maxY + 1 block above
+                        // This ensures barrier stays within region boundaries
+                        startY = bounds[0]; // Region minimum Y
+                        endY = Math.min(bounds[1] + 1, world.getMaxHeight() - 1); // Region max Y + 1 block
+                    } else {
+                        // No bounds data, use player position
+                        startY = baseY;
+                        endY = baseY + 1;
+                    }
                 } else {
-                    startY = baseY - 1;
-                    endY = baseY + barrierHeight;
+                    // Enclosed space - show barrier at player level only
+                    startY = baseY;
+                    endY = baseY + 1;
                 }
 
                 for (int y = startY; y <= endY; y++) {
