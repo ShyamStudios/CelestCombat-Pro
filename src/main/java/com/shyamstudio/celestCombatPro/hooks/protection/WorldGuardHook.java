@@ -715,17 +715,46 @@ public class WorldGuardHook implements Listener {
         }
 
         boolean isSafeZone(int x, int y, int z) {
-            return snapshot.get().isSafeZone(BlockPos.of(world, x, 0, z));
+            Snapshot snap = snapshot.get();
+            BlockPos pos = BlockPos.of(world, x, 0, z);
+            
+            // Check if this XZ column is in a safe zone
+            if (!snap.isSafeZone(pos)) {
+                return false;
+            }
+            
+            // Check if Y is within region bounds
+            int[] bounds = snap.boundsAt(x, z);
+            if (bounds == null) {
+                return false; // No bounds data
+            }
+            
+            // Player must be within region's Y boundaries
+            return y >= bounds[0] && y <= bounds[1];
         }
 
         // ----- hot-path queries (called from PlayerMoveEvent) ----------------
 
         boolean isSafeZone(Location loc) {
-            return snapshot.get().isSafeZone(BlockPos.of(world, loc.getBlockX(), 0, loc.getBlockZ()));
+            return isSafeZone(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
         }
 
         boolean isBorder(int x, int y, int z) {
-            return snapshot.get().isBorder(BlockPos.of(world, x, 0, z));
+            // Border check also needs Y validation
+            Snapshot snap = snapshot.get();
+            BlockPos pos = BlockPos.of(world, x, 0, z);
+            
+            if (!snap.isBorder(pos)) {
+                return false;
+            }
+            
+            // Check if Y is within region bounds
+            int[] bounds = snap.boundsAt(x, z);
+            if (bounds == null) {
+                return false;
+            }
+            
+            return y >= bounds[0] && y <= bounds[1];
         }
 
         int[] boundsAt(int x, int z) {
