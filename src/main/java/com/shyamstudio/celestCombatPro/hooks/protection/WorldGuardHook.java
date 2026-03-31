@@ -106,7 +106,10 @@ public class WorldGuardHook implements Listener {
     }
 
     private boolean isEnabledInWorld(World world) {
-        return world != null && worldSettings.getOrDefault(world.getName(), globalEnabled);
+        if (world == null) return false;
+        // If world is explicitly listed in config, use that value
+        // If not listed, default to false (disabled)
+        return worldSettings.getOrDefault(world.getName(), false);
     }
 
     private boolean isEnabledInWorld(Location loc) {
@@ -117,6 +120,11 @@ public class WorldGuardHook implements Listener {
     // BorderCache access — lazy creation + async rebuild scheduling
     // =========================================================================
     private BorderCache getCacheForWorld(World world) {
+        // Don't create cache for disabled worlds
+        if (!isEnabledInWorld(world)) {
+            return null;
+        }
+        
         return borderCaches.computeIfAbsent(world.getName(), k -> {
             BorderCache cache = new BorderCache(world);
             // Trigger an immediate async rebuild for this world.
@@ -127,7 +135,9 @@ public class WorldGuardHook implements Listener {
 
     private boolean isSafeZone(Location loc) {
         if (!isEnabledInWorld(loc)) return false;
-        return getCacheForWorld(loc.getWorld()).isSafeZone(loc);
+        BorderCache cache = getCacheForWorld(loc.getWorld());
+        if (cache == null) return false;
+        return cache.isSafeZone(loc);
     }
 
     // =========================================================================
@@ -141,6 +151,10 @@ public class WorldGuardHook implements Listener {
         // per player, not per move event.
         Scheduler.runTaskTimerAsync(() -> {
             for (BorderCache cache : borderCaches.values()) {
+                // Only rebuild if this world is enabled in config
+                if (!isEnabledInWorld(cache.world)) {
+                    continue;
+                }
                 if (cache.needsRebuild()) cache.rebuild();
             }
         }, 20L, 20L); // every second, async
@@ -240,6 +254,11 @@ public class WorldGuardHook implements Listener {
 
         // ── 3. Safezone transition — two HashSet.contains() calls ──
         BorderCache cache = getCacheForWorld(world);
+        if (cache == null) {
+            removePlayerBarriers(player);
+            return;
+        }
+        
         boolean fromSafe = cache.isSafeZone(from.getBlockX(), from.getBlockY(), from.getBlockZ());
         boolean toSafe = cache.isSafeZone(to.getBlockX(), to.getBlockY(), to.getBlockZ());
 
@@ -337,6 +356,10 @@ public class WorldGuardHook implements Listener {
         int skyLimit = Math.min(baseY + SKY_CHECK_LIMIT, world.getMaxHeight() - 1);
 
         BorderCache cache = getCacheForWorld(world);
+        if (cache == null) {
+            return Collections.emptySet();
+        }
+        
         Set<BlockPos> result = new HashSet<>();
         
         plugin.debug("[Barrier] Searching for barriers near " + player.getName() 
@@ -861,15 +884,15 @@ public class WorldGuardHook implements Listener {
                         ? (savedQueries * 100.0 / totalRegionBlocks) 
                         : 0;
                 
-                // Performance warnings
+                // Performance warnings (debug only)
                 if (rebuildMs > 100) {
-                    plugin.getLogger().warning("[BorderCache] Slow rebuild detected! Took " 
+                    plugin.debug("[BorderCache] Slow rebuild detected! Took " 
                             + rebuildMs + "ms for world '" + world.getName() 
                             + "'. Consider increasing rebuild interval or splitting large regions.");
                 }
                 
                 if (savePercent < 50 && totalRegionBlocks > 1000) {
-                    plugin.getLogger().warning("[BorderCache] Low cache efficiency (" 
+                    plugin.debug("[BorderCache] Low cache efficiency (" 
                             + String.format("%.1f", savePercent) + "%) in world '" + world.getName() 
                             + "'. This may indicate excessive region overlap or fragmentation.");
                 }

@@ -354,14 +354,15 @@ safezone_protection:
 
   # Per-world configuration
   # You can enable/disable safezone protection for specific worlds
-  # If a world is not listed here, it will use the global 'enabled' setting above
+  # IMPORTANT: Only worlds explicitly listed here will have safezone protection
+  # If a world is not listed, safezone protection will be DISABLED for that world
   # Setting correctly will help save server performance
   worlds:
     # Example configurations:
-    spawn_world: true          # Enable in spawn world
+    # spawn_world: true          # Enable in spawn world
     world: true          # Enable in the main world
-    world_nether: false  # Disable in the nether
-    world_the_end: false  # Disable in the end
+    # world_nether: false  # Disable in the nether (or just don't list it)
+    # world_the_end: false  # Disable in the end (or just don't list it)
     # Add more worlds as needed
 
 #---------------------------------------------------
