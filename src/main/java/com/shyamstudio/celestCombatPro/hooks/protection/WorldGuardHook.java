@@ -177,6 +177,50 @@ public class WorldGuardHook implements Listener {
                 updatePlayerBarriers(player);
             }
         }, 5L, 5L); // every 5 ticks (~250 ms)
+        
+        // ── Safezone bypass prevention task ──────────────────────────────
+        // Checks all combat-tagged players and pushes them out if they're
+        // somehow inside a safezone (bypass attempts, glitches, etc.)
+        // Runs async for minimal main thread impact
+        Scheduler.runTaskTimerAsync(() -> {
+            // Collect players to check (async-safe snapshot)
+            List<UUID> playersToCheck = new ArrayList<>();
+            Map<UUID, Location> playerLocations = new HashMap<>();
+            Map<UUID, String> playerWorlds = new HashMap<>();
+            
+            // Quick main-thread snapshot
+            for (Player player : plugin.getServer().getOnlinePlayers()) {
+                if (!combatManager.isInCombat(player)) continue;
+                if (!isEnabledInWorld(player.getWorld())) continue;
+                
+                UUID uuid = player.getUniqueId();
+                playersToCheck.add(uuid);
+                playerLocations.put(uuid, player.getLocation().clone());
+                playerWorlds.put(uuid, player.getWorld().getName());
+            }
+            
+            // Process checks async (no main thread blocking)
+            List<UUID> playersInSafezone = new ArrayList<>();
+            for (UUID uuid : playersToCheck) {
+                Location loc = playerLocations.get(uuid);
+                if (loc != null && isSafeZone(loc)) {
+                    playersInSafezone.add(uuid);
+                }
+            }
+            
+            // Apply actions on main thread (required for Bukkit API)
+            if (!playersInSafezone.isEmpty()) {
+                Scheduler.runTask(() -> {
+                    for (UUID uuid : playersInSafezone) {
+                        Player player = plugin.getServer().getPlayer(uuid);
+                        if (player != null && player.isOnline() && combatManager.isInCombat(player)) {
+                            pushPlayerOutOfSafezone(player);
+                            sendCooldownMessage(player, "combat_no_safezone_entry");
+                        }
+                    }
+                });
+            }
+        }, 10L, 10L); // every 10 ticks (~500 ms)
 
         // ── General cleanup task ──────────────────────────────────────────
         Scheduler.runTaskTimerAsync(() -> {
@@ -531,6 +575,169 @@ public class WorldGuardHook implements Listener {
             try {
                 player.setVelocity(new Vector(0, 0, 0));
             } catch (Exception ignored) {
+            }
+        });
+    }
+
+    /**
+     * Pushes a player out of a safezone with strong force.
+     * Used to prevent bypass attempts when a player is in combat and somehow
+     * gets inside a safezone (glitches, lag, ender pearls, etc.)
+     * 
+     * This method is called from main thread after async detection.
+     */
+    private void pushPlayerOutOfSafezone(Player player) {
+        if (player == null) return;
+        
+        Location playerLoc = player.getLocation();
+        World world = playerLoc.getWorld();
+        
+        // Quick async search for exit point
+        Scheduler.runTaskAsync(() -> {
+            BorderCache cache = getCacheForWorld(world);
+            if (cache == null) return;
+            
+            // Find nearest non-safezone location (async-safe)
+            Location exitPoint = findNearestExitPoint(playerLoc.clone(), cache);
+            
+            // Apply action on main thread
+            Scheduler.runTask(() -> {
+                // Verify player is still online and in combat
+                if (!player.isOnline() || !combatManager.isInCombat(player)) return;
+                
+                if (exitPoint != null) {
+                    // Calculate direction away from safezone center toward exit
+                    Vector direction = exitPoint.toVector().subtract(player.getLocation().toVector()).normalize();
+                    
+                    // Apply strong velocity push (3x normal push force)
+                    double strongPushForce = pushBackForce * 3.0;
+                    direction.multiply(strongPushForce);
+                    
+                    // Add upward component to help player escape
+                    direction.setY(Math.max(direction.getY(), 0.3));
+                    
+                    try {
+                        player.setVelocity(direction);
+                        plugin.debug("[SafezonePush] Pushed " + player.getName() 
+                                + " out of safezone with force " + strongPushForce);
+                    } catch (Exception e) {
+                        plugin.debug("[SafezonePush] Failed to apply velocity: " + e.getMessage());
+                        // Fallback: teleport to exit point
+                        teleportToExitPoint(player, exitPoint);
+                    }
+                } else {
+                    // No exit point found nearby - teleport to last safe location or spawn
+                    plugin.debug("[SafezonePush] No exit point found for " + player.getName() 
+                            + ", attempting emergency teleport");
+                    emergencyTeleportOutOfSafezone(player);
+                }
+            });
+        });
+    }
+    
+    /**
+     * Finds the nearest location outside the safezone.
+     * Searches in expanding radius around player.
+     * This method is async-safe (no Bukkit API calls that require main thread).
+     */
+    private Location findNearestExitPoint(Location playerLoc, BorderCache cache) {
+        World world = playerLoc.getWorld();
+        int px = playerLoc.getBlockX();
+        int py = playerLoc.getBlockY();
+        int pz = playerLoc.getBlockZ();
+        
+        int worldMinY = world.getMinHeight();
+        int worldMaxY = world.getMaxHeight();
+        
+        // Search in expanding radius (up to 15 blocks)
+        for (int radius = 1; radius <= 15; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    // Only check perimeter of current radius
+                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) continue;
+                    
+                    int x = px + dx;
+                    int z = pz + dz;
+                    
+                    // Check at player's Y level and nearby Y levels
+                    for (int dy = -2; dy <= 2; dy++) {
+                        int y = py + dy;
+                        
+                        // Skip if outside world bounds
+                        if (y < worldMinY || y >= worldMaxY - 1) continue;
+                        
+                        // Check if this location is NOT in safezone (async-safe HashSet lookup)
+                        if (!cache.isSafeZone(x, y, z)) {
+                            // Verify it's a safe landing spot (async-safe - uses world.getBlockAt)
+                            if (isColumnSafe(world, x, y, z)) {
+                                return new Location(world, x + 0.5, y, z + 0.5, 
+                                        playerLoc.getYaw(), playerLoc.getPitch());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Teleports player to exit point as fallback when velocity push fails.
+     */
+    private void teleportToExitPoint(Player player, Location exitPoint) {
+        player.teleportAsync(exitPoint).thenAccept(success -> {
+            if (success) {
+                plugin.debug("[SafezonePush] Teleported " + player.getName() 
+                        + " to exit point at " + exitPoint.getBlockX() + ", " 
+                        + exitPoint.getBlockY() + ", " + exitPoint.getBlockZ());
+            } else {
+                plugin.getLogger().warning("[SafezonePush] Failed to teleport " 
+                        + player.getName() + " to exit point");
+            }
+        });
+    }
+    
+    /**
+     * Emergency teleport when no nearby exit point is found.
+     * Tries to find any safe location outside safezone, or world spawn as last resort.
+     */
+    private void emergencyTeleportOutOfSafezone(Player player) {
+        Location playerLoc = player.getLocation();
+        
+        // Try to find ANY safe location outside safezone (wider search)
+        Location safeLoc = findSafeLocation(playerLoc);
+        
+        if (safeLoc != null) {
+            player.teleportAsync(safeLoc).thenAccept(success -> {
+                if (success) {
+                    plugin.debug("[SafezonePush] Emergency teleport successful for " 
+                            + player.getName());
+                } else {
+                    // Last resort: world spawn
+                    teleportToWorldSpawn(player);
+                }
+            });
+        } else {
+            // Last resort: world spawn
+            teleportToWorldSpawn(player);
+        }
+    }
+    
+    /**
+     * Last resort teleport to world spawn point.
+     */
+    private void teleportToWorldSpawn(Player player) {
+        World world = player.getWorld();
+        Location spawn = world.getSpawnLocation();
+        
+        player.teleportAsync(spawn).thenAccept(success -> {
+            if (success) {
+                plugin.getLogger().warning("[SafezonePush] Teleported " + player.getName() 
+                        + " to world spawn as last resort");
+            } else {
+                plugin.getLogger().severe("[SafezonePush] CRITICAL: Failed to teleport " 
+                        + player.getName() + " anywhere safe!");
             }
         });
     }
