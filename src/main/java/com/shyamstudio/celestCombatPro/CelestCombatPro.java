@@ -13,6 +13,7 @@ import com.shyamstudio.celestCombatPro.listeners.EnderPearlListener;
 import com.shyamstudio.celestCombatPro.hooks.protection.WorldGuardHook;
 import com.shyamstudio.celestCombatPro.hooks.protection.GriefPreventionHook;
 import com.shyamstudio.celestCombatPro.hooks.protection.UXMClaimsHook;
+import com.shyamstudio.celestCombatPro.hooks.practice.StrikePracticeHook;
 import com.shyamstudio.celestCombatPro.hooks.placeholders.CelestCombatExpansion;
 import com.shyamstudio.celestCombatPro.listeners.ItemRestrictionListener;
 import com.shyamstudio.celestCombatPro.listeners.TridentListener;
@@ -49,6 +50,7 @@ public final class CelestCombatPro extends JavaPlugin {
   private WorldGuardHook worldGuardHook;
   private GriefPreventionHook griefPreventionHook;
   private UXMClaimsHook uxmClaimsHook;
+  private StrikePracticeHook strikePracticeHook;
   private CombatAPIImpl combatAPI;
   private CelestCombatExpansion placeholderExpansion;
   private DynamicEventHandler dynamicEventHandler;
@@ -57,6 +59,7 @@ public final class CelestCombatPro extends JavaPlugin {
   public static boolean hasGriefPrevention = false;
   public static boolean hasUXMClaims = false;
   public static boolean hasPlaceholderAPI = false;
+  public static boolean hasStrikePractice = false;
 
   @Override
   public void onEnable() {
@@ -124,6 +127,14 @@ public final class CelestCombatPro extends JavaPlugin {
       getLogger().info("Found UXM Claims but claim protection is disabled in config.");
     }
 
+    // StrikePractice integration (auto-enabled, no config needed)
+    if (isPluginEnabled("StrikePractice") && isStrikePracticeAPIAvailable()) {
+      hasStrikePractice = true;
+      strikePracticeHook = new StrikePracticeHook(this, combatManager);
+      getServer().getPluginManager().registerEvents(strikePracticeHook, this);
+      getLogger().info("StrikePractice integration enabled successfully!");
+    }
+
     commandManager = new CommandManager(this);
     commandManager.registerCommands();
 
@@ -182,6 +193,10 @@ public final class CelestCombatPro extends JavaPlugin {
 
     if (uxmClaimsHook != null) {
       uxmClaimsHook.cleanup();
+    }
+
+    if (strikePracticeHook != null) {
+      strikePracticeHook.cleanup();
     }
 
     if (killRewardManager != null) {
@@ -263,6 +278,18 @@ public final class CelestCombatPro extends JavaPlugin {
       Class.forName("me.ryanhamshire.GriefPrevention.GriefPrevention");
       return true;
     } catch (ClassNotFoundException | NoClassDefFoundError e) {
+      return false;
+    }
+  }
+
+  private boolean isStrikePracticeAPIAvailable() {
+    try {
+      Class.forName("ga.strikepractice.api.StrikePracticeAPI");
+      Class.forName("ga.strikepractice.events.DuelEndEvent");
+      Class.forName("ga.strikepractice.events.FightEndEvent");
+      return true;
+    } catch (ClassNotFoundException | NoClassDefFoundError e) {
+      getLogger().warning("StrikePractice plugin found but API classes not available. Make sure strikepractice-api.jar is in the libs/ folder.");
       return false;
     }
   }

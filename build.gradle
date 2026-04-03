@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.shyamstudio'
-version = '1.3.4'
+version = '1.3.5'
 
 java {
     toolchain {
@@ -39,6 +39,11 @@ repositories {
         name = 'placeholderapi'
         url = uri('https://repo.extendedclip.com/content/repositories/placeholderapi/')
     }
+    
+    // Include libs directory for StrikePractice API
+    flatDir {
+        dirs 'libs'
+    }
 }
 
 
@@ -63,6 +68,9 @@ dependencies {
     compileOnly 'com.github.GriefPrevention:GriefPrevention:17.0.0'
 
     compileOnly 'me.clip:placeholderapi:2.11.6'
+    
+    // StrikePractice API - compileOnly (not shaded, must be on server)
+    compileOnly 'ga.strikepractice:strikepractice-api'
 
     compileOnly 'org.projectlombok:lombok:1.18.38'
     annotationProcessor 'org.projectlombok:lombok:1.18.38'
