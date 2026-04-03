@@ -51,7 +51,10 @@ public class MessageManager {
 
     public void sendMessage(CommandSender sender, String key, Map<String, String> placeholders) {
         if (!messages.contains(key)) {
-            plugin.getLogger().warning("Message key not found: " + key);
+            // Fallback: send hardcoded message with key name
+            String fallbackMessage = "&c[CelestCombat] &7Message not configured: &e" + key;
+            sender.sendMessage(translateColors(fallbackMessage));
+            plugin.getLogger().warning("Message key not found: " + key + " - Sent fallback message to player");
             return;
         }
 

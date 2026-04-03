@@ -91,7 +91,8 @@ public class WorldGuardHook implements Listener {
 
         borderCaches.clear();
         plugin.debug("WorldGuard safezone protection reloaded. Global: " + globalEnabled 
-                + ", Chunk Cache: " + useChunkCache);
+                + ", Chunk Cache: " + useChunkCache 
+                + ", Push Force: " + pushBackForce);
     }
 
     @SuppressWarnings("ConstantConditions")
@@ -609,9 +610,8 @@ public class WorldGuardHook implements Listener {
                     // Calculate direction away from safezone center toward exit
                     Vector direction = exitPoint.toVector().subtract(player.getLocation().toVector()).normalize();
                     
-                    // Apply strong velocity push (3x normal push force)
-                    double strongPushForce = pushBackForce * 3.0;
-                    direction.multiply(strongPushForce);
+                    // Apply velocity push using configured force
+                    direction.multiply(pushBackForce);
                     
                     // Add upward component to help player escape
                     direction.setY(Math.max(direction.getY(), 0.3));
@@ -619,7 +619,7 @@ public class WorldGuardHook implements Listener {
                     try {
                         player.setVelocity(direction);
                         plugin.debug("[SafezonePush] Pushed " + player.getName() 
-                                + " out of safezone with force " + strongPushForce);
+                                + " out of safezone with force " + pushBackForce);
                     } catch (Exception e) {
                         plugin.debug("[SafezonePush] Failed to apply velocity: " + e.getMessage());
                         // Fallback: teleport to exit point
@@ -692,7 +692,7 @@ public class WorldGuardHook implements Listener {
                         + " to exit point at " + exitPoint.getBlockX() + ", " 
                         + exitPoint.getBlockY() + ", " + exitPoint.getBlockZ());
             } else {
-                plugin.getLogger().warning("[SafezonePush] Failed to teleport " 
+                plugin.debug("[SafezonePush] Failed to teleport " 
                         + player.getName() + " to exit point");
             }
         });
@@ -700,7 +700,8 @@ public class WorldGuardHook implements Listener {
     
     /**
      * Emergency teleport when no nearby exit point is found.
-     * Tries to find any safe location outside safezone, or world spawn as last resort.
+     * Tries to find any safe location outside safezone (wider search).
+     * Does NOT teleport to world spawn - just logs warning.
      */
     private void emergencyTeleportOutOfSafezone(Player player) {
         Location playerLoc = player.getLocation();
@@ -714,32 +715,15 @@ public class WorldGuardHook implements Listener {
                     plugin.debug("[SafezonePush] Emergency teleport successful for " 
                             + player.getName());
                 } else {
-                    // Last resort: world spawn
-                    teleportToWorldSpawn(player);
+                    plugin.debug("[SafezonePush] Failed to teleport " 
+                            + player.getName() + " to safe location. Player remains in safezone.");
                 }
             });
         } else {
-            // Last resort: world spawn
-            teleportToWorldSpawn(player);
+            // No safe location found - just log debug message
+            plugin.debug("[SafezonePush] Could not find safe exit point for " 
+                    + player.getName() + ". Player remains in safezone with combat timer.");
         }
-    }
-    
-    /**
-     * Last resort teleport to world spawn point.
-     */
-    private void teleportToWorldSpawn(Player player) {
-        World world = player.getWorld();
-        Location spawn = world.getSpawnLocation();
-        
-        player.teleportAsync(spawn).thenAccept(success -> {
-            if (success) {
-                plugin.getLogger().warning("[SafezonePush] Teleported " + player.getName() 
-                        + " to world spawn as last resort");
-            } else {
-                plugin.getLogger().severe("[SafezonePush] CRITICAL: Failed to teleport " 
-                        + player.getName() + " anywhere safe!");
-            }
-        });
     }
 
     // =========================================================================

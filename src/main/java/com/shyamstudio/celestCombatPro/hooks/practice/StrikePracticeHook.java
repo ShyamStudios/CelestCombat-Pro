@@ -11,6 +11,9 @@ import org.bukkit.event.Listener;
 /**
  * Hook for StrikePractice plugin integration.
  * Automatically removes combat timers when practice matches end.
+ * 
+ * Note: Currently only supports Duel matches. FFA matches require players
+ * to wait for combat timer to expire naturally.
  */
 public class StrikePracticeHook implements Listener {
 
@@ -20,7 +23,7 @@ public class StrikePracticeHook implements Listener {
     public StrikePracticeHook(CelestCombatPro plugin, CombatManager combatManager) {
         this.plugin = plugin;
         this.combatManager = combatManager;
-        plugin.debug("StrikePractice hook initialized");
+        plugin.debug("StrikePractice hook initialized - Duel support enabled");
     }
 
     /**
