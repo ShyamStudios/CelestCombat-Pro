@@ -5,7 +5,7 @@
 [![bStats](https://img.shields.io/badge/bStats-Metrics-blue.svg?logo=chart-line&logoColor=white)](https://bstats.org/plugin/bukkit/CelestCombat-Pro/27299)
 
 CelestCombat Pro is a highly optimized, feature-rich, and enterprise-grade combat management plugin for Minecraft servers specializing in PvP environments. Fully compatible with Paper, Purpur, and Folia, it provides comprehensive combat logging prevention, forcefields, anti-glitch systems, newbie protections, and kill rewards without sacrificing server performance.
-
+Crediting original: https://github.com/ptthanh02/CelestCombat
 ---
 
 ## 📖 Table of Contents
