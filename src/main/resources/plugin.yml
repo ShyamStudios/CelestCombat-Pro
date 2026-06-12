@@ -1,0 +1,33 @@
+name: CelestCombat-Pro
+version: '2.0.0'
+main: com.shyamstudio.celestCombatPro.CelestCombatPro
+api-version: '1.21'
+authors: [ RaviRai, Nighter, WeThink ]
+description: A simple combat logging plugins
+folia-supported: true
+load: POSTWORLD
+
+softdepend:
+  - WorldGuard
+  - GriefPrevention
+  - UXMClaims
+  - Multiverse-Core
+  - Worlds
+  - PlaceholderAPI
+
+commands:
+  celestcombat:
+    description: Main command for CelestCombat
+    usage: /celestcombat
+    aliases: [cc, combat]
+
+permissions:
+  celestcombat.command.use:
+    description: Allows players to use all commands of CelestCombat
+    default: op
+  celestcombat.update.notify:
+    description: Allows players to receive update notifications
+    default: op
+  celestcombat.bypass.tag:
+    description: Allows players to bypass being tagged in combat
+    default: false

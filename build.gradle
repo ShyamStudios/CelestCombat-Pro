@@ -1,0 +1,90 @@
+plugins {
+    id 'java'
+    id 'xyz.jpenilla.run-paper' version '2.3.1'
+}
+
+group = 'com.shyamstudio'
+version = '2.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+
+    maven {
+        name = 'papermc'
+        url = uri('https://repo.papermc.io/repository/maven-public/')
+    }
+
+    maven {
+        name = 'enginehub'
+        url = uri('https://maven.enginehub.org/repo/')
+    }
+
+    maven {
+        name = 'sonatype'
+        url = uri('https://oss.sonatype.org/content/groups/public/')
+    }
+
+    maven {
+        name = 'jitpack'
+        url = uri('https://jitpack.io')
+    }
+
+    maven {
+        name = 'placeholderapi'
+        url = uri('https://repo.extendedclip.com/content/repositories/placeholderapi/')
+    }
+    
+}
+
+
+configurations.all {
+    resolutionStrategy {
+        force(
+            'com.google.guava:guava:33.3.1-jre',
+            'com.google.code.gson:gson:2.11.0',
+            'it.unimi.dsi:fastutil:8.5.15'
+        )
+    }
+}
+
+dependencies {
+
+    compileOnly 'io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT'
+
+    compileOnly 'com.sk89q.worldedit:worldedit-bukkit:7.4.0-SNAPSHOT'
+    compileOnly 'com.sk89q.worldguard:worldguard-bukkit:7.0.13-SNAPSHOT'
+
+
+    compileOnly 'com.github.GriefPrevention:GriefPrevention:17.0.0'
+
+    compileOnly 'me.clip:placeholderapi:2.11.6'
+    
+
+    compileOnly 'org.projectlombok:lombok:1.18.38'
+    annotationProcessor 'org.projectlombok:lombok:1.18.38'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release.set(21)
+}
+
+processResources {
+    inputs.property 'version', version
+    filteringCharset 'UTF-8'
+
+    filesMatching('plugin.yml') {
+        expand version: version
+    }
+}
+
+
+tasks.runServer {
+    minecraftVersion '1.21.11'
+}

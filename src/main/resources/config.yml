@@ -1,0 +1,208 @@
+debug: false
+
+event_priorities:
+  command_blocking: "LOW"
+  combat_damage: "HIGH"
+  player_movement: "HIGH"
+  teleportation: "HIGH"
+  item_usage: "HIGH"
+  flight_control: "HIGH"
+
+combat:
+  duration: 20s
+  command_block_mode: "blacklist"
+  blocked_commands:
+    - "logout"
+    - "tpa"
+    - "tpahere"
+    - "afk"
+    - "spawn"
+    - "tpaccept"
+    - "tpacancel"
+    - "rtp"
+    - "warp"
+    - "home"
+    - "team"
+    - "enderchest"
+    - "ec"
+    - "vanish"
+    - "v"
+  allowed_commands:
+    - "msg"
+    - "r"
+    - "reply"
+    - "tell"
+    - "w"
+    - "whisper"
+    - "shop"
+    - "buy"
+    - "sell"
+    - "ah"
+  exempt_admin_kick: true
+  disable_flight: false
+  combat_logout:
+    enabled: true
+    kill_player: true
+    reward_attacker: true
+    punishment_commands:
+      - "broadcast &c%player% &7logged out during combat!"
+    attacker_reward_commands:
+      - "broadcast &a%player% &7killed &c%victim% &7(Combat Logout)"
+  item_restrictions:
+    enabled: true
+    disabled_items:
+      - CHORUS_FRUIT
+      - ELYTRA
+
+enderpearl:
+  refresh_combat_on_land: false
+
+enderpearl_cooldown:
+  enabled: true
+  duration: 10s
+  in_combat_only: true
+  worlds:
+    minigames: false
+
+enderpearl_fix:
+  enabled: true
+  prevent_block_stuck: true
+  prevent_micro_teleport: true
+  min_teleport_distance: 1.2
+  prevent_barrier_glitch: true
+  max_block_check_radius: 3
+  prevent_tight_spaces: true
+  max_surrounding_blocks: 6
+  worlds:
+    world: true
+    world_nether: true
+    world_the_end: true
+    minigames: false
+
+trident:
+  refresh_combat_on_land: false
+  banned_worlds:
+    world_nether: true
+
+trident_cooldown:
+  enabled: true
+  duration: "10s"
+  in_combat_only: true
+  worlds:
+    world: true
+    world_nether: false
+    world_the_end: true
+
+death_animation:
+  enabled: true
+  only_player_kill: true
+  animation:
+    lightning: true
+    fire_particles: true
+
+kill_rewards:
+  enabled: true
+  commands:
+    - "donutcratecore shards give %killer% 10"
+  cooldown:
+    use_global_cooldown: false
+    duration: 1d
+    use_same_player_cooldown: true
+    same_player_duration: 1d
+
+newbie_protection:
+  enabled: true
+  duration: 10m
+  protect_from_pvp: true
+  protect_from_mobs: false
+  remove_on_damage_dealt: true
+  display:
+    use_bossbar: true
+    use_actionbar: false
+    bossbar:
+      title: "&#4CAF50PvP Protection: &#FFFFFF%time%"
+      color: "GREEN"
+      style: "SOLID"
+  worlds:
+    world: true
+    world_nether: false
+    world_the_end: false
+
+safezone_protection:
+  enabled: true
+  barrier_material: "RED_STAINED_GLASS"
+  barrier_detection_radius: 5
+  barrier_height: 3
+  push_back_force: 0.6
+  border_cache_rebuild_interval_ms: 30000
+  use_chunk_cache: false
+  liquid_protection_radius: 2
+  worlds:
+    world: true
+
+claim_protection:
+  enabled: false
+  barrier_material: "BLUE_STAINED_GLASS"
+  barrier_detection_radius: 5
+  barrier_height: 3
+  push_back_force: 0.6
+  required_permission: BUILD
+  worlds:
+    world: true
+    world_nether: true
+    world_the_end: false
+
+uxm_claims_protection:
+  enabled: false
+  prevent_claim_entry: true
+  prevent_combat_in_claims: true
+  allow_owner_combat: false
+  allow_trusted_combat: false
+  push_back_force: 0.6
+  prevent_teleport_entry: true
+  block_combat_items:
+    enabled: true
+    items:
+      - ENDER_PEARL
+      - CHORUS_FRUIT
+      - TOTEM_OF_UNDYING
+  block_commands_in_claims: true
+  blocked_commands:
+    - "home"
+    - "spawn"
+    - "warp"
+    - "tpa"
+    - "back"
+  disable_flight_in_claims: true
+  send_entry_blocked_message: true
+  send_combat_blocked_message: true
+  send_teleport_blocked_message: true
+  message_cooldown: 2
+  claim_types:
+    admin_claims:
+      prevent_entry: true
+      prevent_combat: true
+      allow_owner_combat: false
+    player_claims:
+      prevent_entry: true
+      prevent_combat: true
+      allow_owner_combat: false
+    public_claims:
+      prevent_entry: false
+      prevent_combat: false
+      allow_owner_combat: true
+  worlds:
+    world: true
+    world_nether: false
+    world_the_end: true
+    pvp_world: false
+    minigames: false
+  cache:
+    enabled: true
+    ttl: 10000
+    max_size: 1000
+    cleanup_interval: 30000
+  integration:
+    respect_worldguard: true
+    respect_griefprevention: true
+    priority: 10
