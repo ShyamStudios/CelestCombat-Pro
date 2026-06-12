@@ -47,7 +47,7 @@ public class WorldGuardHook implements Listener {
     private final Map<String, BorderCache> borderCaches = new ConcurrentHashMap<>();
 
     private final Map<UUID, Set<BlockPos>> playerBarriers = new ConcurrentHashMap<>();
-    private final Map<BlockPos, Material>  originalBlocks = new ConcurrentHashMap<>();
+    private final Map<BlockPos, org.bukkit.block.data.BlockData>  originalBlocks = new ConcurrentHashMap<>();
     private final Map<BlockPos, Set<UUID>> barrierViewers = new ConcurrentHashMap<>();
 
     private final Set<UUID> barrierUpdateNeeded = ConcurrentHashMap.newKeySet();
@@ -429,8 +429,13 @@ public class WorldGuardHook implements Listener {
 
                 if (!cache.isBorder(cx, baseY, cz)) continue;
 
+                int[] bounds = cache.boundsAt(cx, cz);
+                if (bounds == null) continue;
+
                 for (int y = Math.max(startY, minY); y <= Math.min(endY, maxY); y++) {
-                    result.add(BlockPos.of(world, cx, y, cz));
+                    if (y >= bounds[0] && y <= bounds[1]) {
+                        result.add(BlockPos.of(world, cx, y, cz));
+                    }
                 }
             }
         }
@@ -442,8 +447,10 @@ public class WorldGuardHook implements Listener {
 
     private void createBarrierBlock(BlockPos pos, Player player) {
         Location loc = pos.toLocation(player.getWorld());
+        Block block = loc.getBlock();
+        if (block.getType().isSolid()) return;
 
-        originalBlocks.putIfAbsent(pos, Material.AIR);
+        originalBlocks.putIfAbsent(pos, block.getBlockData());
         barrierViewers.computeIfAbsent(pos, k -> new HashSet<>()).add(player.getUniqueId());
         player.sendBlockChange(loc, barrierMaterial.createBlockData());
 
@@ -459,11 +466,11 @@ public class WorldGuardHook implements Listener {
         Location loc = pos.toLocation(player.getWorld());
         if (viewers.isEmpty()) {
             barrierViewers.remove(pos);
-            Material original = originalBlocks.remove(pos);
-            if (original != null) player.sendBlockChange(loc, original.createBlockData());
+            org.bukkit.block.data.BlockData original = originalBlocks.remove(pos);
+            if (original != null) player.sendBlockChange(loc, original);
         } else {
-            Material original = originalBlocks.get(pos);
-            if (original != null) player.sendBlockChange(loc, original.createBlockData());
+            org.bukkit.block.data.BlockData original = originalBlocks.get(pos);
+            if (original != null) player.sendBlockChange(loc, original);
         }
     }
 
@@ -736,6 +743,9 @@ public class WorldGuardHook implements Listener {
                 Location probe = new Location(world, 0, 0, 0);
 
                 for (ProtectedRegion region : rm.getRegions().values()) {
+                    if (region.getFlag(Flags.PVP) != com.sk89q.worldguard.protection.flags.StateFlag.State.DENY) {
+                        continue;
+                    }
                     BlockVector3 min = region.getMinimumPoint();
                     BlockVector3 max = region.getMaximumPoint();
                     long area = (long)(max.x() - min.x() + 1) * (max.z() - min.z() + 1);
@@ -814,7 +824,7 @@ public class WorldGuardHook implements Listener {
                         + newSafeZone.size() + " safe cols, " + newBorder.size() + " border cols, "
                         + columnCache.size() + " unique WG queries.");
 
-                if (ms > 100) {
+                if (ms > 100 && plugin.getConfig().getBoolean("debug", false)) {
                     plugin.getLogger().warning("[BorderCache] Slow rebuild (" + ms + "ms) for '"
                             + world.getName() + "'. Consider increasing rebuild interval or splitting large regions.");
                 }

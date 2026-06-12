@@ -65,7 +65,7 @@ enderpearl_cooldown:
     minigames: false
 
 enderpearl_fix:
-  enabled: true
+  enabled: false
   prevent_block_stuck: true
   prevent_micro_teleport: true
   min_teleport_distance: 1.2
@@ -94,14 +94,14 @@ trident_cooldown:
     world_the_end: true
 
 death_animation:
-  enabled: true
+  enabled: false
   only_player_kill: true
   animation:
     lightning: true
     fire_particles: true
 
 kill_rewards:
-  enabled: true
+  enabled: false
   commands:
     - "donutcratecore shards give %killer% 10"
   cooldown:
