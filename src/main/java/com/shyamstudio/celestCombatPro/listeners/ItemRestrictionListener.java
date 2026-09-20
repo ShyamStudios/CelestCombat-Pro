@@ -24,8 +24,8 @@ public class ItemRestrictionListener implements Listener {
     private final CelestCombatPro plugin;
     private final CombatManager combatManager;
 
-    private boolean itemRestrictions;
-    private List<String> disabledItems = Collections.emptyList();
+    private volatile boolean itemRestrictions;
+    private volatile List<String> disabledItems = Collections.emptyList();
 
     public ItemRestrictionListener(CelestCombatPro plugin,  CombatManager combatManager) {
         this.plugin = plugin;
@@ -128,9 +128,11 @@ public class ItemRestrictionListener implements Listener {
 
         // Prevent equipping Elytra to chestplate slot
         if (event.getSlot() == 38 && event.getSlotType() == org.bukkit.event.inventory.InventoryType.SlotType.ARMOR) {
-            if (clickedItem != null && clickedItem.getType() == Material.ELYTRA || cursorItem.getType() == Material.ELYTRA) {
+            boolean clickedElytra = clickedItem != null && clickedItem.getType() == Material.ELYTRA;
+            boolean cursorElytra = cursorItem != null && cursorItem.getType() == Material.ELYTRA;
+            if (clickedElytra || cursorElytra) {
                 event.setCancelled(true);
-                
+
                 Map<String, String> placeholders = new HashMap<>();
                 placeholders.put("player", player.getName());
                 placeholders.put("item", "Elytra");

@@ -21,34 +21,37 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.time.LocalDate;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 public class UpdateChecker implements Listener {
     private final JavaPlugin plugin;
     private final String projectId = "Kp9Kt4QT";
-    private boolean updateAvailable = false;
     private final String currentVersion;
-    private String latestVersion = "";
-    private String downloadUrl = "";
-    private String directLink = "";
+    private volatile boolean updateAvailable = false;
+    private volatile String latestVersion = "";
+    private volatile String downloadUrl = "";
+    private volatile String directLink = "";
+    private volatile long lastUpdateCheck = 0L;
+
+    private static final long UPDATE_CHECK_INTERVAL_MS = TimeUnit.HOURS.toMillis(1);
 
     private static final String CONSOLE_RESET = "\u001B[0m";
     private static final String CONSOLE_BRIGHT_GREEN = "\u001B[92m";
     private static final String CONSOLE_YELLOW = "\u001B[33m";
     private static final String CONSOLE_BRIGHT_BLUE = "\u001B[94m";
-    private static final String CONSOLE_LAVENDER = "\u001B[38;5;183m";
-    private static final String CONSOLE_PINK = "\u001B[38;5;206m";
-    private static final String CONSOLE_DEEP_PINK = "\u001B[38;5;198m";
 
-    private final Map<UUID, LocalDate> notifiedPlayers = new HashMap<>();
+    private final Map<UUID, LocalDate> notifiedPlayers = new ConcurrentHashMap<>();
+    private final AtomicBoolean checkInProgress = new AtomicBoolean(false);
 
     public UpdateChecker(JavaPlugin plugin) {
         this.plugin = plugin;
-        this.currentVersion = plugin.getDescription().getVersion();
+        this.currentVersion = plugin.getPluginMeta().getVersion();
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
 
         checkForUpdates().thenAccept(hasUpdate -> {
@@ -76,7 +79,7 @@ public class UpdateChecker implements Listener {
                 "────────────────────────────────────────────────────" + CONSOLE_RESET);
         plugin.getLogger().info("");
         plugin.getLogger().info(frameColor +
-                CONSOLE_RESET + "📦 Current version: " + CONSOLE_YELLOW  + formatConsoleText(currentVersion, 31) + CONSOLE_RESET);
+                CONSOLE_RESET + "📦 Current version: " + CONSOLE_YELLOW + formatConsoleText(currentVersion, 31) + CONSOLE_RESET);
         plugin.getLogger().info(frameColor +
                 CONSOLE_RESET + "✅ Latest version: " + CONSOLE_BRIGHT_GREEN + formatConsoleText(latestVersion, 32) + CONSOLE_RESET);
         plugin.getLogger().info("");
@@ -100,75 +103,102 @@ public class UpdateChecker implements Listener {
     }
 
     /**
-     * Checks for updates from Modrinth
+     * Checks for updates from Modrinth. Results are cached for one hour so joining players
+     * never trigger a network request on their own.
+     *
      * @return CompletableFuture that resolves to true if an update is available
      */
     public CompletableFuture<Boolean> checkForUpdates() {
-        return CompletableFuture.supplyAsync(() -> {
+        if (!plugin.isEnabled()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        if (updateAvailable) {
+            return CompletableFuture.completedFuture(true);
+        }
+        if (System.currentTimeMillis() - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) {
+            return CompletableFuture.completedFuture(false);
+        }
+        if (!checkInProgress.compareAndSet(false, true)) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        Scheduler.runAsync(() -> {
             try {
-                URL url = new URL("https://api.modrinth.com/v2/project/" + projectId + "/version");
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setRequestProperty("User-Agent", "CelestCombat-UpdateChecker/1.0");
+                result.complete(performUpdateCheck());
+            } catch (Throwable t) {
+                plugin.getLogger().warning("Error checking for updates: " + t.getMessage());
+                result.complete(false);
+            } finally {
+                lastUpdateCheck = System.currentTimeMillis();
+                checkInProgress.set(false);
+            }
+        });
+        return result;
+    }
 
-                if (connection.getResponseCode() != 200) {
-                    plugin.getLogger().warning("Failed to check for updates. HTTP Error: " + connection.getResponseCode());
-                    return false;
-                }
+    private boolean performUpdateCheck() throws Exception {
+        URL url = new URL("https://api.modrinth.com/v2/project/" + projectId + "/version");
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+        connection.setRequestProperty("User-Agent", "CelestCombat-UpdateChecker/1.0");
 
-                BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
-                String response = reader.lines().collect(Collectors.joining("\n"));
-                reader.close();
+        try {
+            if (connection.getResponseCode() != 200) {
+                plugin.getLogger().warning("Failed to check for updates. HTTP Error: " + connection.getResponseCode());
+                return false;
+            }
 
-                JsonArray versions = JsonParser.parseString(response).getAsJsonArray();
-                if (versions.isEmpty()) {
-                    return false;
-                }
+            String response;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+                response = reader.lines().collect(Collectors.joining("\n"));
+            }
 
-                JsonObject latestVersionObj = null;
-                for (JsonElement element : versions) {
-                    JsonObject version = element.getAsJsonObject();
-                    String versionType = version.get("version_type").getAsString();
-                    if (versionType.equals("release")) {
-                        if (latestVersionObj == null) {
+            JsonArray versions = JsonParser.parseString(response).getAsJsonArray();
+            if (versions.isEmpty()) {
+                return false;
+            }
+
+            JsonObject latestVersionObj = null;
+            for (JsonElement element : versions) {
+                JsonObject version = element.getAsJsonObject();
+                String versionType = version.get("version_type").getAsString();
+                if (versionType.equals("release")) {
+                    if (latestVersionObj == null) {
+                        latestVersionObj = version;
+                    } else {
+                        String currentDate = latestVersionObj.get("date_published").getAsString();
+                        String newDate = version.get("date_published").getAsString();
+                        if (newDate.compareTo(currentDate) > 0) {
                             latestVersionObj = version;
-                        } else {
-                            String currentDate = latestVersionObj.get("date_published").getAsString();
-                            String newDate = version.get("date_published").getAsString();
-                            if (newDate.compareTo(currentDate) > 0) {
-                                latestVersionObj = version;
-                            }
                         }
                     }
                 }
+            }
 
-                if (latestVersionObj == null) {
-                    return false;
-                }
-
-                latestVersion = latestVersionObj.get("version_number").getAsString();
-                String versionId = latestVersionObj.get("id").getAsString();
-
-                downloadUrl = "https://modrinth.com/plugin/" + projectId + "/version/" + latestVersion;
-
-                JsonArray files = latestVersionObj.getAsJsonArray("files");
-                if (!files.isEmpty()) {
-                    JsonObject primaryFile = files.get(0).getAsJsonObject();
-                    directLink = primaryFile.get("url").getAsString();
-                }
-
-                Version latest = new Version(latestVersion);
-                Version current = new Version(currentVersion);
-
-                updateAvailable = latest.compareTo(current) > 0;
-                return updateAvailable;
-
-            } catch (Exception e) {
-                plugin.getLogger().warning("Error checking for updates: " + e.getMessage());
-                e.printStackTrace();
+            if (latestVersionObj == null) {
                 return false;
             }
-        });
+
+            String foundVersion = latestVersionObj.get("version_number").getAsString();
+            latestVersion = foundVersion;
+
+            downloadUrl = "https://modrinth.com/plugin/" + projectId + "/version/" + foundVersion;
+
+            JsonArray files = latestVersionObj.getAsJsonArray("files");
+            if (!files.isEmpty()) {
+                JsonObject primaryFile = files.get(0).getAsJsonObject();
+                directLink = primaryFile.get("url").getAsString();
+            }
+
+            Version latest = new Version(foundVersion);
+            Version current = new Version(currentVersion);
+
+            updateAvailable = latest.compareTo(current) > 0;
+            return updateAvailable;
+        } finally {
+            connection.disconnect();
+        }
     }
 
     /**
@@ -177,7 +207,7 @@ public class UpdateChecker implements Listener {
      * @param player The player to notify
      */
     private void sendUpdateNotification(Player player) {
-        if (!updateAvailable || !player.hasPermission("celestcombat.update.notify")) {
+        if (!updateAvailable || !player.isOnline() || !player.hasPermission("celestcombat.update.notify")) {
             return;
         }
 
@@ -219,37 +249,42 @@ public class UpdateChecker implements Listener {
         player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.8f, 1.2f);
     }
 
-
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
 
-        if (player.hasPermission("celestcombat.update.notify")) {
+        if (!player.hasPermission("celestcombat.update.notify")) {
+            return;
+        }
 
-            UUID playerId = player.getUniqueId();
-            LocalDate today = LocalDate.now();
+        UUID playerId = player.getUniqueId();
+        LocalDate today = LocalDate.now();
 
-            notifiedPlayers.entrySet().removeIf(entry -> entry.getValue().isBefore(today));
+        notifiedPlayers.entrySet().removeIf(entry -> entry.getValue().isBefore(today));
 
-            if (notifiedPlayers.containsKey(playerId) && notifiedPlayers.get(playerId).isEqual(today)) {
-                return;
-            }
+        if (today.equals(notifiedPlayers.get(playerId))) {
+            return;
+        }
 
-            if (updateAvailable) {
-                Scheduler.runTaskLater(() -> {
-                    sendUpdateNotification(player);
+        if (updateAvailable) {
+            Scheduler.runEntityLater(player, () -> {
+                sendUpdateNotification(player);
+                if (player.isOnline()) {
                     notifiedPlayers.put(playerId, today);
-                }, 40L);
-            } else {
-                checkForUpdates().thenAccept(hasUpdate -> {
-                    if (hasUpdate) {
-                        Scheduler.runTask(() -> {
-                            sendUpdateNotification(player);
+                }
+            }, 40L);
+        } else {
+            checkForUpdates().thenAccept(hasUpdate -> {
+                if (hasUpdate) {
+                    // The name is only used for the message; capture it to avoid retaining the entity
+                    Scheduler.runEntity(player, () -> {
+                        sendUpdateNotification(player);
+                        if (player.isOnline()) {
                             notifiedPlayers.put(playerId, today);
-                        });
-                    }
-                });
-            }
+                        }
+                    });
+                }
+            });
         }
     }
 }

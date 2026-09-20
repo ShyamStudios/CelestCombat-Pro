@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class NewbieProtectionManager {
     private final CelestCombatPro plugin;
     private final File protectionFile;
-    private FileConfiguration protectionConfig;
+    private final Object saveLock = new Object();
 
     // Protection storage - UUID -> expiration time in milliseconds
     @Getter private final Map<UUID, Long> protectedPlayers = new ConcurrentHashMap<>();
@@ -27,19 +27,19 @@ public class NewbieProtectionManager {
     // Boss bars for countdown display
     private final Map<UUID, BossBar> protectionBossBars = new ConcurrentHashMap<>();
 
-    // Configuration cache
-    private boolean enabled;
-    private long protectionDurationTicks;
-    private long protectionDurationSeconds;
-    private boolean useBossBar;
-    private boolean useActionBar;
-    private String bossBarTitle;
-    private BarColor bossBarColor;
-    private BarStyle bossBarStyle;
-    private Map<String, Boolean> worldProtectionSettings = new ConcurrentHashMap<>();
-    private boolean protectFromPvP;
-    private boolean protectFromMobs;
-    private boolean removeOnDamageDealt;
+    // Configuration cache (written on reload, read on region threads)
+    private volatile boolean enabled;
+    private volatile long protectionDurationTicks;
+    private volatile long protectionDurationSeconds;
+    private volatile boolean useBossBar;
+    private volatile boolean useActionBar;
+    private volatile String bossBarTitle;
+    private volatile BarColor bossBarColor;
+    private volatile BarStyle bossBarStyle;
+    private volatile Map<String, Boolean> worldProtectionSettings = new ConcurrentHashMap<>();
+    private volatile boolean protectFromPvP;
+    private volatile boolean protectFromMobs;
+    private volatile boolean removeOnDamageDealt;
 
     // Tasks
     private Scheduler.Task updateTask;
@@ -142,7 +142,7 @@ public class NewbieProtectionManager {
             }
         }
 
-        protectionConfig = YamlConfiguration.loadConfiguration(protectionFile);
+        YamlConfiguration protectionConfig = YamlConfiguration.loadConfiguration(protectionFile);
 
         // Load protection data from file
         int loadedCount = 0;
@@ -178,21 +178,18 @@ public class NewbieProtectionManager {
      * @param synchronous if true, saves synchronously (used during shutdown)
      */
     public void saveProtectionData(boolean synchronous) {
-        if (protectionConfig == null) {
-            protectionConfig = new YamlConfiguration();
+        // Snapshot under lock so concurrent saves never share mutable YAML state
+        Map<UUID, Long> snapshot;
+        synchronized (saveLock) {
+            snapshot = new HashMap<>(protectedPlayers);
         }
 
-        // Clear existing data
-        for (String key : protectionConfig.getKeys(false)) {
-            protectionConfig.set(key, null);
-        }
-
-        // Save current protections
+        final YamlConfiguration output = new YamlConfiguration();
         long currentTime = System.currentTimeMillis();
-        for (Map.Entry<UUID, Long> entry : protectedPlayers.entrySet()) {
+        for (Map.Entry<UUID, Long> entry : snapshot.entrySet()) {
             // Only save non-expired protections
             if (entry.getValue() > currentTime) {
-                protectionConfig.set(entry.getKey().toString(), entry.getValue());
+                output.set(entry.getKey().toString(), entry.getValue());
             }
         }
 
@@ -200,16 +197,16 @@ public class NewbieProtectionManager {
         if (synchronous || !plugin.isEnabled()) {
             // Save synchronously during shutdown or if plugin is disabled
             try {
-                protectionConfig.save(protectionFile);
+                output.save(protectionFile);
                 plugin.debug("Saved newbie protection data to file (synchronous)");
             } catch (IOException e) {
                 plugin.getLogger().severe("Failed to save newbie_protection_data.yml: " + e.getMessage());
             }
         } else {
             // Save asynchronously during normal operation
-            Scheduler.runTaskAsync(() -> {
+            Scheduler.runAsync(() -> {
                 try {
-                    protectionConfig.save(protectionFile);
+                    output.save(protectionFile);
                     plugin.debug("Saved newbie protection data to file");
                 } catch (IOException e) {
                     plugin.getLogger().severe("Failed to save newbie_protection_data.yml: " + e.getMessage());
@@ -245,16 +242,19 @@ public class NewbieProtectionManager {
 
         protectedPlayers.put(playerUUID, expirationTime);
 
-        // Create boss bar if enabled
-        if (useBossBar) {
-            createBossBar(player);
-        }
+        // Boss bar creation and player messaging are player-bound: run on the owning thread
+        Scheduler.runEntity(player, () -> {
+            // Create boss bar if enabled
+            if (useBossBar) {
+                createBossBar(player);
+            }
 
-        // Send protection granted message
-        Map<String, String> placeholders = new HashMap<>();
-        placeholders.put("player", player.getName());
-        placeholders.put("duration", formatTime(protectionDurationSeconds));
-        plugin.getMessageService().sendMessage(player, "newbie_protection_granted", placeholders);
+            // Send protection granted message
+            Map<String, String> placeholders = new HashMap<>();
+            placeholders.put("player", player.getName());
+            placeholders.put("duration", formatTime(protectionDurationSeconds));
+            plugin.getMessageService().sendMessage(player, "newbie_protection_granted", placeholders);
+        });
 
         plugin.debug("Granted newbie protection to " + player.getName() + " until " + new Date(expirationTime));
     }
@@ -299,12 +299,22 @@ public class NewbieProtectionManager {
 
         if (hadProtection) {
             // Remove boss bar
-            BossBar bossBar = protectionBossBars.remove(playerUUID);
-            if (bossBar != null) {
-                bossBar.removeAll();
-            }
+            removeBossBar(playerUUID);
 
             plugin.debug("Removed newbie protection from " + player.getName());
+        }
+    }
+
+    private void removeBossBar(UUID playerUUID) {
+        BossBar bossBar = protectionBossBars.remove(playerUUID);
+        if (bossBar == null) {
+            return;
+        }
+        Player player = Bukkit.getPlayer(playerUUID);
+        if (player != null && player.isOnline()) {
+            Scheduler.runEntity(player, bossBar::removeAll);
+        } else {
+            bossBar.removeAll();
         }
     }
 
@@ -321,7 +331,8 @@ public class NewbieProtectionManager {
             Map<String, String> placeholders = new HashMap<>();
             placeholders.put("player", player.getName());
             placeholders.put("attacker", attacker.getName());
-            plugin.getMessageService().sendMessage(attacker, "newbie_protection_attack_blocked", placeholders);
+            Scheduler.runEntity(attacker,
+                    () -> plugin.getMessageService().sendMessage(attacker, "newbie_protection_attack_blocked", placeholders));
         }
 
         return true; // Block damage
@@ -334,7 +345,8 @@ public class NewbieProtectionManager {
         if (removeOnDamageDealt && hasProtection(player)) {
             Map<String, String> placeholders = new HashMap<>();
             placeholders.put("player", player.getName());
-            plugin.getMessageService().sendMessage(player, "newbie_protection_removed_attack", placeholders);
+            Scheduler.runEntity(player,
+                    () -> plugin.getMessageService().sendMessage(player, "newbie_protection_removed_attack", placeholders));
 
             removeProtection(player, false);
         }
@@ -453,28 +465,34 @@ public class NewbieProtectionManager {
             updateTask.cancel();
         }
 
-        updateTask = Scheduler.runTaskTimer(() -> {
-            for (UUID playerUUID : new HashSet<>(protectedPlayers.keySet())) {
+        updateTask = Scheduler.runGlobalTimer(() -> {
+            if (protectedPlayers.isEmpty()) {
+                return;
+            }
+            for (UUID playerUUID : protectedPlayers.keySet()) {
                 Player player = Bukkit.getPlayer(playerUUID);
                 if (player == null || !player.isOnline()) {
                     continue;
                 }
 
-                if (!hasProtection(player)) {
-                    continue; // Protection expired, will be cleaned up
-                }
+                // Boss bar / action bar updates are player UI: run on the player's thread
+                Scheduler.runEntity(player, () -> {
+                    if (!hasProtection(player)) {
+                        return; // Protection expired, will be cleaned up
+                    }
 
-                // Update boss bar
-                if (useBossBar) {
-                    updateBossBar(player);
-                }
+                    // Update boss bar
+                    if (useBossBar) {
+                        updateBossBar(player);
+                    }
 
-                // Send action bar
-                if (useActionBar) {
-                    sendActionBar(player);
-                }
+                    // Send action bar
+                    if (useActionBar) {
+                        sendActionBar(player);
+                    }
+                });
             }
-        }, 0L, UPDATE_INTERVAL);
+        }, 1L, UPDATE_INTERVAL);
     }
 
     /**
@@ -485,7 +503,7 @@ public class NewbieProtectionManager {
             cleanupTask.cancel();
         }
 
-        cleanupTask = Scheduler.runTaskTimerAsync(() -> {
+        cleanupTask = Scheduler.runAsyncTimer(() -> {
             long currentTime = System.currentTimeMillis();
             int removedCount = 0;
 
@@ -496,13 +514,7 @@ public class NewbieProtectionManager {
                     UUID playerUUID = entry.getKey();
                     iterator.remove();
 
-                    // Remove boss bar on main thread
-                    Scheduler.runTask(() -> {
-                        BossBar bossBar = protectionBossBars.remove(playerUUID);
-                        if (bossBar != null) {
-                            bossBar.removeAll();
-                        }
-                    });
+                    removeBossBar(playerUUID);
 
                     removedCount++;
                 }
@@ -522,7 +534,7 @@ public class NewbieProtectionManager {
             saveTask.cancel();
         }
 
-        saveTask = Scheduler.runTaskTimerAsync(this::saveProtectionData, SAVE_INTERVAL, SAVE_INTERVAL);
+        saveTask = Scheduler.runAsyncTimer(this::saveProtectionData, SAVE_INTERVAL, SAVE_INTERVAL);
     }
 
     /**
@@ -565,11 +577,7 @@ public class NewbieProtectionManager {
     public void handlePlayerQuit(Player player) {
         if (player == null) return;
 
-        UUID playerUUID = player.getUniqueId();
-        BossBar bossBar = protectionBossBars.remove(playerUUID);
-        if (bossBar != null) {
-            bossBar.removeAll();
-        }
+        removeBossBar(player.getUniqueId());
     }
 
     /**

@@ -12,23 +12,22 @@ import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public class KillRewardManager {
     private final CelestCombatPro plugin;
     private final File cooldownFile;
-    private FileConfiguration cooldownConfig;
+    private final Object saveLock = new Object();
 
     // Cooldown storage - using String keys for better performance than UUID concatenation
     @Getter private final Map<String, Long> killRewardCooldowns = new ConcurrentHashMap<>();
 
-    // Configuration cache
-    private boolean enabled;
-    private List<String> rewardCommands;
-    private boolean useGlobalCooldown;
-    private boolean useSamePlayerCooldown;
-    private long globalCooldownDuration;
-    private long samePlayerCooldownDuration;
+    // Configuration cache (written on reload, read on region threads)
+    private volatile boolean enabled;
+    private volatile List<String> rewardCommands;
+    private volatile boolean useGlobalCooldown;
+    private volatile boolean useSamePlayerCooldown;
+    private volatile long globalCooldownDuration;
+    private volatile long samePlayerCooldownDuration;
 
     // Tasks
     private Scheduler.Task cleanupTask;
@@ -89,7 +88,7 @@ public class KillRewardManager {
             }
         }
 
-        cooldownConfig = YamlConfiguration.loadConfiguration(cooldownFile);
+        YamlConfiguration cooldownConfig = YamlConfiguration.loadConfiguration(cooldownFile);
 
         // Load cooldowns from file
         int loadedCount = 0;
@@ -120,21 +119,18 @@ public class KillRewardManager {
      * @param synchronous if true, saves synchronously (used during shutdown)
      */
     public void saveCooldownData(boolean synchronous) {
-        if (cooldownConfig == null) {
-            cooldownConfig = new YamlConfiguration();
+        // Snapshot under lock so concurrent saves never share mutable YAML state
+        Map<String, Long> snapshot;
+        synchronized (saveLock) {
+            snapshot = new HashMap<>(killRewardCooldowns);
         }
 
-        // Clear existing data
-        for (String key : cooldownConfig.getKeys(false)) {
-            cooldownConfig.set(key, null);
-        }
-
-        // Save current cooldowns
+        final YamlConfiguration output = new YamlConfiguration();
         long currentTime = System.currentTimeMillis();
-        for (Map.Entry<String, Long> entry : killRewardCooldowns.entrySet()) {
+        for (Map.Entry<String, Long> entry : snapshot.entrySet()) {
             // Only save non-expired cooldowns
             if (entry.getValue() > currentTime) {
-                cooldownConfig.set(entry.getKey(), entry.getValue());
+                output.set(entry.getKey(), entry.getValue());
             }
         }
 
@@ -142,16 +138,16 @@ public class KillRewardManager {
         if (synchronous || !plugin.isEnabled()) {
             // Save synchronously during shutdown or if plugin is disabled
             try {
-                cooldownConfig.save(cooldownFile);
+                output.save(cooldownFile);
                 plugin.debug("Saved kill reward cooldowns to file (synchronous)");
             } catch (IOException e) {
                 plugin.getLogger().severe("Failed to save kill_cooldowns_data.yml: " + e.getMessage());
             }
         } else {
             // Save asynchronously during normal operation
-            Scheduler.runTaskAsync(() -> {
+            Scheduler.runAsync(() -> {
                 try {
-                    cooldownConfig.save(cooldownFile);
+                    output.save(cooldownFile);
                     plugin.debug("Saved kill reward cooldowns to file");
                 } catch (IOException e) {
                     plugin.getLogger().severe("Failed to save kill_cooldowns_data.yml: " + e.getMessage());
@@ -223,20 +219,28 @@ public class KillRewardManager {
             return;
         }
 
-        // Flag to track if at least one command executed successfully
-        AtomicBoolean anyCommandSuccessful = new AtomicBoolean(false);
+        // Resolve placeholders while the players are guaranteed to be valid references
+        String killerName = killer.getName();
+        String victimName = victim != null ? victim.getName() : "Unknown";
+        List<String> processedCommands = new ArrayList<>(rewardCommands.size());
+        for (String command : rewardCommands) {
+            if (command == null || command.isBlank()) continue;
+            processedCommands.add(command
+                    .replace("%killer%", killerName)
+                    .replace("%victim%", victimName));
+        }
+        if (processedCommands.isEmpty()) {
+            return;
+        }
 
-        // Execute commands on main thread
-        Scheduler.runTask(() -> {
-            for (String command : rewardCommands) {
-                String processedCommand = command
-                        .replace("%killer%", killer.getName())
-                        .replace("%victim%", victim.getName());
-
+        // Console commands are global operations on Folia: single ordered global task
+        Scheduler.runGlobal(() -> {
+            boolean anyCommandSuccessful = false;
+            for (String processedCommand : processedCommands) {
                 try {
                     Bukkit.dispatchCommand(Bukkit.getConsoleSender(), processedCommand);
                     plugin.debug("Executed kill reward command: " + processedCommand);
-                    anyCommandSuccessful.set(true);
+                    anyCommandSuccessful = true;
                 } catch (Exception e) {
                     plugin.getLogger().warning("Failed to execute kill reward command '" +
                             processedCommand + "': " + e.getMessage());
@@ -244,8 +248,8 @@ public class KillRewardManager {
             }
 
             // Send success message to killer if at least one command succeeded
-            if (anyCommandSuccessful.get()) {
-                sendKillRewardMessage(killer, victim);
+            if (anyCommandSuccessful) {
+                Scheduler.runEntity(killer, () -> sendKillRewardMessage(killer, killerName, victimName));
             }
         });
     }
@@ -253,21 +257,48 @@ public class KillRewardManager {
     /**
      * Sends kill reward message to the killer
      */
-    private void sendKillRewardMessage(Player killer, Player victim) {
+    private void sendKillRewardMessage(Player killer, String killerName, String victimName) {
         if (killer == null || !killer.isOnline()) {
             return;
         }
 
         try {
             Map<String, String> placeholders = new HashMap<>();
-            placeholders.put("killer", killer.getName());
-            placeholders.put("victim", victim != null ? victim.getName() : "Unknown");
+            placeholders.put("killer", killerName);
+            placeholders.put("victim", victimName);
 
             plugin.getMessageService().sendMessage(killer, "kill_reward_received", placeholders);
-            plugin.debug("Sent kill reward message to " + killer.getName());
+            plugin.debug("Sent kill reward message to " + killerName);
         } catch (Exception e) {
-            plugin.getLogger().warning("Failed to send kill reward message to " + killer.getName() + ": " + e.getMessage());
+            plugin.getLogger().warning("Failed to send kill reward message to " + killerName + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * Atomically claims the applicable cooldown for this kill.
+     *
+     * @return true when no active cooldown existed (the reward may be given)
+     */
+    private boolean claimCooldown(Player killer, Player victim) {
+        long currentTime = System.currentTimeMillis();
+
+        if (useGlobalCooldown) {
+            String globalKey = GLOBAL_COOLDOWN_PREFIX + killer.getUniqueId();
+            long expirationTime = currentTime + globalCooldownDuration;
+            Long result = killRewardCooldowns.merge(globalKey, expirationTime,
+                    (existing, replacement) -> currentTime < existing ? existing : replacement);
+            return result != null && result == expirationTime;
+        }
+
+        if (useSamePlayerCooldown && victim != null) {
+            String playerKey = PLAYER_COOLDOWN_PREFIX + killer.getUniqueId() + ":" + victim.getUniqueId();
+            long expirationTime = currentTime + samePlayerCooldownDuration;
+            Long result = killRewardCooldowns.merge(playerKey, expirationTime,
+                    (existing, replacement) -> currentTime < existing ? existing : replacement);
+            return result != null && result == expirationTime;
+        }
+
+        return true;
     }
 
     /**
@@ -283,16 +314,13 @@ public class KillRewardManager {
             return;
         }
 
-        // Check cooldown
-        if (isOnCooldown(killer, victim)) {
+        // Atomic cooldown claim prevents duplicate command execution on concurrent events
+        if (!claimCooldown(killer, victim)) {
             plugin.debug("Kill reward cooldown active for " + killer.getName() + " -> " + victim.getName());
             return;
         }
 
         plugin.debug("Processing kill reward for " + killer.getName() + " -> " + victim.getName());
-
-        // Set cooldown first to prevent rapid execution
-        setCooldown(killer, victim);
 
         // Execute reward commands (which will also send the message)
         executeRewardCommands(killer, victim);
@@ -332,7 +360,7 @@ public class KillRewardManager {
             cleanupTask.cancel();
         }
 
-        cleanupTask = Scheduler.runTaskTimerAsync(() -> {
+        cleanupTask = Scheduler.runAsyncTimer(() -> {
             long currentTime = System.currentTimeMillis();
             int removedCount = 0;
 
@@ -360,7 +388,7 @@ public class KillRewardManager {
             saveTask.cancel();
         }
 
-        saveTask = Scheduler.runTaskTimerAsync(this::saveCooldownData, SAVE_INTERVAL, SAVE_INTERVAL);
+        saveTask = Scheduler.runAsyncTimer(this::saveCooldownData, SAVE_INTERVAL, SAVE_INTERVAL);
     }
 
     /**

@@ -38,16 +38,16 @@ public class GriefPreventionHook implements Listener {
     private final Map<Location, Material> originalBlocks = new ConcurrentHashMap<>();
     private final Map<Location, Set<UUID>> barrierViewers = new ConcurrentHashMap<>();
 
-    // Configuration
-    private boolean globalEnabled;
-    private final Map<String, Boolean> worldSettings = new HashMap<>();
-    private int barrierDetectionRadius;
-    private int barrierHeight;
-    private Material barrierMaterial;
-    private double pushBackForce;
+    // Configuration (written on reload, read on region threads)
+    private volatile boolean globalEnabled;
+    private volatile Map<String, Boolean> worldSettings = new ConcurrentHashMap<>();
+    private volatile int barrierDetectionRadius;
+    private volatile int barrierHeight;
+    private volatile Material barrierMaterial;
+    private volatile double pushBackForce;
 
     // Cache for performance optimization
-    private ClaimPermission requiredPermission;
+    private volatile ClaimPermission requiredPermission;
     private final Map<String, Boolean> claimCache = new ConcurrentHashMap<>();
     private long lastCacheClean = System.currentTimeMillis();
     private static final long CACHE_CLEAN_INTERVAL = 30000; // 30 seconds
@@ -81,30 +81,30 @@ public class GriefPreventionHook implements Listener {
     }
 
     private void loadWorldSettings() {
-        worldSettings.clear();
+        Map<String, Boolean> settings = new ConcurrentHashMap<>();
 
         if (plugin.getConfig().isConfigurationSection("claim_protection.worlds")) {
             var worldSection = plugin.getConfig().getConfigurationSection("claim_protection.worlds");
             if (worldSection != null) {
                 for (String worldName : worldSection.getKeys(false)) {
                     boolean enabled = worldSection.getBoolean(worldName, globalEnabled);
-                    worldSettings.put(worldName, enabled);
+                    settings.put(worldName, enabled);
                     plugin.debug("Claim protection for world '" + worldName + "': " + (enabled ? "enabled" : "disabled"));
                 }
             }
         }
 
-        plugin.debug("Loaded " + worldSettings.size() + " world-specific claim protection settings");
+        this.worldSettings = settings;
+        plugin.debug("Loaded " + settings.size() + " world-specific claim protection settings");
     }
 
     private boolean isEnabledInWorld(World world) {
         if (world == null) return false;
 
-        String worldName = world.getName();
-
         // Check if there's a specific setting for this world
-        if (worldSettings.containsKey(worldName)) {
-            return worldSettings.get(worldName);
+        Boolean setting = worldSettings.get(world.getName());
+        if (setting != null) {
+            return setting;
         }
 
         // Fall back to global setting
@@ -223,29 +223,13 @@ public class GriefPreventionHook implements Listener {
 
         // Check if this block is a barrier for this player
         Set<Location> playerBarrierSet = playerBarriers.get(player.getUniqueId());
-        if (playerBarrierSet != null && containsBlockLocation(playerBarrierSet, blockLoc)) {
+        if (playerBarrierSet != null && playerBarrierSet.contains(normalizeToBlockLocation(blockLoc))) {
             // Cancel the interaction to prevent visual glitches
             event.setCancelled(true);
 
             // Refresh the barrier block for the player to fix any visual issues
-            Scheduler.runTaskLater(() -> refreshBarrierBlock(blockLoc, player), 1L);
+            Scheduler.runEntityLater(player, () -> refreshBarrierBlock(blockLoc, player), 1L);
         }
-    }
-
-    /**
-     * Helper method to check if a set of locations contains a block location
-     * This normalizes locations to block coordinates for proper comparison
-     */
-    private boolean containsBlockLocation(Set<Location> locations, Location blockLoc) {
-        Location normalizedBlockLoc = normalizeToBlockLocation(blockLoc);
-
-        for (Location loc : locations) {
-            Location normalizedLoc = normalizeToBlockLocation(loc);
-            if (normalizedLoc.equals(normalizedBlockLoc)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -368,20 +352,19 @@ public class GriefPreventionHook implements Listener {
         }
 
         Set<Location> newBarriers = findNearbyBarrierLocations(player.getLocation(), player);
-        Set<Location> currentBarriers = playerBarriers.getOrDefault(player.getUniqueId(), new HashSet<>());
+        Set<Location> currentBarriers = playerBarriers.getOrDefault(player.getUniqueId(), Collections.emptySet());
 
-        // Remove barriers that are no longer needed
-        Set<Location> toRemove = new HashSet<>(currentBarriers);
-        toRemove.removeAll(newBarriers);
-        for (Location loc : toRemove) {
-            removeBarrierBlock(loc, player);
+        // Barrier locations are stored normalized, so direct set membership is safe
+        for (Location loc : currentBarriers) {
+            if (!newBarriers.contains(loc)) {
+                removeBarrierBlock(loc, player);
+            }
         }
 
-        // Add new barriers
-        Set<Location> toAdd = new HashSet<>(newBarriers);
-        toAdd.removeAll(currentBarriers);
-        for (Location loc : toAdd) {
-            createBarrierBlock(loc, player);
+        for (Location loc : newBarriers) {
+            if (!currentBarriers.contains(loc)) {
+                createBarrierBlock(loc, player);
+            }
         }
 
         // Update player's barrier set
@@ -393,28 +376,29 @@ public class GriefPreventionHook implements Listener {
     }
 
     /**
-     * Finds locations where barriers should be placed near the player
+     * Finds locations where barriers should be placed near the player.
+     * Uses integer block math — no per-block Location allocation for distance checks.
      */
     private Set<Location> findNearbyBarrierLocations(Location playerLoc, Player player) {
         Set<Location> barrierLocations = new HashSet<>();
+        World world = playerLoc.getWorld();
+        if (world == null) {
+            return barrierLocations;
+        }
 
-        // Search in a radius around the player for claim borders
         int radius = barrierDetectionRadius;
+        int radiusSq = radius * radius;
+        int baseX = playerLoc.getBlockX();
+        int baseY = playerLoc.getBlockY();
+        int baseZ = playerLoc.getBlockZ();
 
-        for (int x = -radius; x <= radius; x++) {
-            for (int z = -radius; z <= radius; z++) {
-                for (int y = -2; y <= barrierHeight; y++) {
-                    Location checkLoc = playerLoc.clone().add(x, y, z);
-
-                    // Skip if too far from player (circular radius)
-                    if (checkLoc.distance(playerLoc) > radius) {
-                        continue;
-                    }
-
-                    // Check if this location is on the border between unprotected and protected claims
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if (dx * dx + dz * dz > radiusSq) continue;
+                for (int dy = -2; dy <= barrierHeight; dy++) {
+                    Location checkLoc = new Location(world, baseX + dx, baseY + dy, baseZ + dz);
                     if (isBorderLocation(checkLoc, player)) {
-                        // Normalize the location to block coordinates
-                        barrierLocations.add(normalizeToBlockLocation(checkLoc));
+                        barrierLocations.add(checkLoc);
                     }
                 }
             }
@@ -427,21 +411,21 @@ public class GriefPreventionHook implements Listener {
      * Checks if a location is on the border between unprotected and protected claims
      */
     private boolean isBorderLocation(Location loc, Player player) {
-        if (!isInProtectedClaim(loc, player)) {
+        World world = loc.getWorld();
+        if (world == null) return false;
+
+        int x = loc.getBlockX();
+        int y = loc.getBlockY();
+        int z = loc.getBlockZ();
+
+        if (!isInProtectedClaim(world, x, y, z, player)) {
             return false;
         }
 
-        // Check adjacent blocks to see if any are unprotected
-        int[][] directions = {{1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1}};
-
-        for (int[] dir : directions) {
-            Location adjacent = loc.clone().add(dir[0], dir[1], dir[2]);
-            if (!isInProtectedClaim(adjacent, player)) {
-                return true;
-            }
-        }
-
-        return false;
+        return !isInProtectedClaim(world, x + 1, y, z, player)
+                || !isInProtectedClaim(world, x - 1, y, z, player)
+                || !isInProtectedClaim(world, x, y, z + 1, player)
+                || !isInProtectedClaim(world, x, y, z - 1, player);
     }
 
     /**
@@ -512,7 +496,7 @@ public class GriefPreventionHook implements Listener {
      * Enhanced cleanup task with better memory management
      */
     private void startCleanupTask() {
-        Scheduler.runTaskTimerAsync(() -> {
+        Scheduler.runAsyncTimer(() -> {
             long currentTime = System.currentTimeMillis();
 
             // Clean up barriers for players no longer in combat
@@ -528,26 +512,23 @@ public class GriefPreventionHook implements Listener {
     }
 
     private void cleanupPlayerBarriers() {
-        Iterator<Map.Entry<UUID, Set<Location>>> iterator = playerBarriers.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<UUID, Set<Location>> entry = iterator.next();
-            UUID playerUUID = entry.getKey();
+        for (UUID playerUUID : new ArrayList<>(playerBarriers.keySet())) {
             Player player = plugin.getServer().getPlayer(playerUUID);
+            if (player != null && player.isOnline() && combatManager.isInCombat(player)) {
+                continue;
+            }
 
-            if (player == null || !player.isOnline() || !combatManager.isInCombat(player)) {
-                // Remove barriers for this player
-                Set<Location> barriers = entry.getValue();
-                if (player != null && player.isOnline()) {
-                    for (Location loc : barriers) {
-                        removeBarrierBlock(loc, player);
-                    }
-                } else {
-                    // Player is offline, just clean up data
-                    for (Location loc : barriers) {
-                        cleanupOfflinePlayerBarrier(loc, playerUUID);
-                    }
+            // Remove barriers for this player
+            Set<Location> barriers = playerBarriers.remove(playerUUID);
+            if (barriers == null) continue;
+            if (player != null && player.isOnline()) {
+                // Block packets must be sent from the owning region thread
+                Scheduler.runEntity(player, () -> barriers.forEach(loc -> removeBarrierBlock(loc, player)));
+            } else {
+                // Player is offline, just clean up data
+                for (Location loc : barriers) {
+                    cleanupOfflinePlayerBarrier(loc, playerUUID);
                 }
-                iterator.remove();
             }
         }
     }
@@ -584,13 +565,15 @@ public class GriefPreventionHook implements Listener {
      */
     private boolean isInProtectedClaim(Location location, Player player) {
         if (location == null) return false;
+        return isInProtectedClaim(location.getWorld(),
+                location.getBlockX(), location.getBlockY(), location.getBlockZ(), player);
+    }
+
+    private boolean isInProtectedClaim(World world, int x, int y, int z, Player player) {
+        if (world == null) return false;
 
         // Create cache key
-        String cacheKey = location.getWorld().getName() + ":" +
-                location.getBlockX() + ":" +
-                location.getBlockY() + ":" +
-                location.getBlockZ() + ":" +
-                player.getUniqueId().toString();
+        String cacheKey = world.getName() + ":" + x + ":" + y + ":" + z + ":" + player.getUniqueId();
 
         // Check cache first
         Boolean cached = claimCache.get(cacheKey);
@@ -599,7 +582,7 @@ public class GriefPreventionHook implements Listener {
         }
 
         try {
-            Claim claim = GriefPrevention.instance.dataStore.getClaimAt(location, false, null);
+            Claim claim = GriefPrevention.instance.dataStore.getClaimAt(new Location(world, x, y, z), false, null);
 
             boolean isProtected = false;
             if (claim != null) {
@@ -615,19 +598,6 @@ public class GriefPreventionHook implements Listener {
             plugin.getLogger().warning("Error checking GriefPrevention claim: " + e.getMessage());
             return false; // Default to not protected if there's an error
         }
-    }
-
-    private boolean isLocationSafe(Location location) {
-        if (location == null) return false;
-
-        Block feet = location.getBlock();
-        Block head = location.clone().add(0, 1, 0).getBlock();
-        Block ground = location.clone().add(0, -1, 0).getBlock();
-
-        // Location is safe if feet and head are air, and ground is solid
-        return (feet.getType() == Material.AIR || !feet.getType().isSolid())
-                && (head.getType() == Material.AIR || !head.getType().isSolid())
-                && ground.getType().isSolid();
     }
 
     private void sendCooldownMessage(Player player) {

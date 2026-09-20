@@ -15,6 +15,7 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRiptideEvent;
 import org.bukkit.inventory.ItemStack;
 
@@ -32,14 +33,18 @@ public class TridentListener implements Listener {
         this.combatManager = combatManager;
     }
 
-    // Track players with active trident countdown displays to avoid duplicates
-    private final Map<UUID, Scheduler.Task> tridentCountdownTasks = new ConcurrentHashMap<>();
-
     // Track thrown tridents to their player owners
     private final Map<Integer, UUID> activeTridents = new ConcurrentHashMap<>();
 
     // Store original locations for riptide rollback
     private final Map<UUID, Location> riptideOriginalLocations = new ConcurrentHashMap<>();
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID playerUUID = event.getPlayer().getUniqueId();
+        riptideOriginalLocations.remove(playerUUID);
+        activeTridents.entrySet().removeIf(entry -> entry.getValue().equals(playerUUID));
+    }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onTridentUse(PlayerInteractEvent event) {
@@ -99,9 +104,6 @@ public class TridentListener implements Listener {
         // Set cooldown for riptide usage
         combatManager.setTridentCooldown(player);
 
-        // Start displaying the countdown
-        startTridentCountdown(player);
-
         // Refresh combat on riptide usage if enabled
         combatManager.refreshCombatOnTridentLand(player);
 
@@ -128,9 +130,6 @@ public class TridentListener implements Listener {
             } else {
                 // Set cooldown when player successfully launches a trident (non-riptide)
                 combatManager.setTridentCooldown(player);
-
-                // Start displaying the countdown for trident cooldown
-                startTridentCountdown(player);
 
                 // Track this trident to the player for the hit event
                 activeTridents.put(event.getEntity().getEntityId(), player.getUniqueId());
@@ -161,78 +160,24 @@ public class TridentListener implements Listener {
         Location originalLocation = riptideOriginalLocations.remove(player.getUniqueId());
 
         if (originalLocation != null) {
-            Scheduler.runEntityTaskLater(player, () -> {
-                if (player.isOnline()) {
-                    player.setVelocity(player.getVelocity().multiply(0));
-                    if (player.getLocation().distance(originalLocation) > 5) {
-                        player.teleportAsync(originalLocation);
-                    }
+            Scheduler.runEntityLater(player, () -> {
+                if (!player.isOnline()) {
+                    return;
+                }
+                player.setVelocity(player.getVelocity().multiply(0));
+
+                Location current = player.getLocation();
+                if (current.getWorld() != null && current.getWorld().equals(originalLocation.getWorld())
+                        && current.distanceSquared(originalLocation) > 25) {
+                    player.teleportAsync(originalLocation);
                 }
             }, 2L);
         } else {
-            Scheduler.runEntityTask(player, () -> player.setVelocity(player.getVelocity().multiply(0)));
-        }
-    }
-
-    /**
-     * Starts a separate countdown task for trident cooldown display.
-     * This ensures the countdown is shown regardless of combat status.
-     */
-    private void startTridentCountdown(Player player) {
-        if (player == null) return;
-
-        UUID playerUUID = player.getUniqueId();
-
-        // Cancel any existing countdown task for this player
-        Scheduler.Task existingTask = tridentCountdownTasks.get(playerUUID);
-        if (existingTask != null) {
-            existingTask.cancel();
-        }
-
-        // How often to update the countdown message (in ticks, 20 = 1 second)
-        long updateInterval = 20L;
-
-        // Create a new countdown task
-        Scheduler.Task task = Scheduler.runTaskTimer(() -> {
-            // Check if player is still online
-            if (!player.isOnline()) {
-                cancelTridentCountdown(playerUUID);
-                return;
-            }
-
-            // Check if cooldown is still active
-            if (!combatManager.isTridentOnCooldown(player)) {
-                cancelTridentCountdown(playerUUID);
-                return;
-            }
-
-            // Get remaining time
-            int remainingTime = combatManager.getRemainingTridentCooldown(player);
-
-            // Send the appropriate message
-            Map<String, String> placeholders = new HashMap<>();
-            placeholders.put("player", player.getName());
-            placeholders.put("time", String.valueOf(remainingTime));
-
-            // If player is in combat, CombatManager will handle the combined message
-            // Otherwise, send a trident-specific message
-            if (!combatManager.isInCombat(player)) {
-                plugin.getMessageService().sendMessage(player, "trident_only_countdown", placeholders);
-            }
-
-        }, 0L, updateInterval);
-
-        // Store the task
-        tridentCountdownTasks.put(playerUUID, task);
-    }
-
-    /**
-     * Cancels and removes the trident countdown task for a player.
-     */
-    private void cancelTridentCountdown(UUID playerUUID) {
-        Scheduler.Task task = tridentCountdownTasks.remove(playerUUID);
-        if (task != null) {
-            task.cancel();
+            Scheduler.runEntity(player, () -> {
+                if (player.isOnline()) {
+                    player.setVelocity(player.getVelocity().multiply(0));
+                }
+            });
         }
     }
 
@@ -261,8 +206,6 @@ public class TridentListener implements Listener {
      * Call this from your main plugin's onDisable method.
      */
     public void shutdown() {
-        tridentCountdownTasks.values().forEach(Scheduler.Task::cancel);
-        tridentCountdownTasks.clear();
         activeTridents.clear();
         riptideOriginalLocations.clear();
     }

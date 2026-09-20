@@ -1,6 +1,7 @@
 package com.shyamstudio.celestCombatPro.api;
 
 import com.shyamstudio.celestCombatPro.CelestCombatPro;
+import com.shyamstudio.celestCombatPro.Scheduler;
 import com.shyamstudio.celestCombatPro.api.events.*;
 import com.shyamstudio.celestCombatPro.combat.CombatManager;
 import org.bukkit.Bukkit;
@@ -47,7 +48,7 @@ public class CombatAPIImpl implements CombatAPI {
         if (player == null || !isInCombat(player)) return;
         
         Player lastAttacker = getCombatOpponent(player);
-        long totalCombatTime = System.currentTimeMillis() - (combatManager.getPlayersInCombat().get(player.getUniqueId()) - (getCombatDuration() * 1000));
+        long totalCombatTime = getElapsedCombatTime(player);
         
         combatManager.removeFromCombat(player);
         
@@ -60,12 +61,20 @@ public class CombatAPIImpl implements CombatAPI {
         if (player == null || !isInCombat(player)) return;
         
         Player lastAttacker = getCombatOpponent(player);
-        long totalCombatTime = System.currentTimeMillis() - (combatManager.getPlayersInCombat().get(player.getUniqueId()) - (getCombatDuration() * 1000));
+        long totalCombatTime = getElapsedCombatTime(player);
         
         combatManager.removeFromCombatSilently(player);
         
         CombatEndEvent combatEndEvent = new CombatEndEvent(player, lastAttacker, CombatEndEvent.CombatEndReason.ADMIN_REMOVE, totalCombatTime);
         Bukkit.getPluginManager().callEvent(combatEndEvent);
+    }
+    
+    private long getElapsedCombatTime(Player player) {
+        Long endTime = combatManager.getPlayersInCombat().get(player.getUniqueId());
+        if (endTime == null) {
+            return 0L;
+        }
+        return System.currentTimeMillis() - (endTime - (combatManager.getCombatDurationSeconds() * 1000L));
     }
     
     @Override
@@ -178,24 +187,27 @@ public class CombatAPIImpl implements CombatAPI {
     public void disconnectPlayerSafely(Player player) {
         if (player == null) return;
         
-        // Kick the player without triggering combat log punishment
-        // The combat tag remains active and will continue after reconnect
-        player.kickPlayer("Disconnected safely by admin");
+        // Kicking is an entity-bound operation: dispatch on the player's scheduler
+        Scheduler.runEntity(player, () -> {
+            if (player.isOnline()) {
+                player.kickPlayer("Disconnected safely by admin");
+            }
+        });
     }
     
     @Override
     public long getCombatDuration() {
-        return plugin.getTimeFromConfig("combat.duration", "20s") / 20;
+        return combatManager.getCombatDurationSeconds();
     }
     
     @Override
     public long getEnderPearlCooldownDuration() {
-        return plugin.getTimeFromConfig("enderpearl_cooldown.duration", "10s") / 20;
+        return combatManager.getEnderPearlCooldownSeconds();
     }
     
     @Override
     public long getTridentCooldownDuration() {
-        return plugin.getTimeFromConfig("trident_cooldown.duration", "10s") / 20;
+        return combatManager.getTridentCooldownSeconds();
     }
     
     @Override

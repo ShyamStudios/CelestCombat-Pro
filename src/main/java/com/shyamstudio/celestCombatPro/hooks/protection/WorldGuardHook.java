@@ -62,6 +62,8 @@ public class WorldGuardHook implements Listener {
 
     private final Map<UUID, Long> lastMessageTime = new ConcurrentHashMap<>();
 
+    private final List<Scheduler.Task> scheduledTasks = new ArrayList<>();
+
     private volatile boolean             globalEnabled;
     private volatile Map<String, Boolean> worldSettings    = new HashMap<>();
     private volatile int                 barrierDetectionRadius;
@@ -128,7 +130,7 @@ public class WorldGuardHook implements Listener {
         if (!isEnabledInWorld(world)) return null;
         return borderCaches.computeIfAbsent(world.getName(), k -> {
             BorderCache cache = new BorderCache(world);
-            Scheduler.runTaskAsync(cache::rebuild);
+            Scheduler.runAsync(cache::rebuild);
             return cache;
         });
     }
@@ -154,77 +156,27 @@ public class WorldGuardHook implements Listener {
 
 
     private void startTasks() {
+        cancelTasks();
 
-        Scheduler.runTaskTimerAsync(() -> {
+        // Player location reads are region-bound on Folia: the async scan only selects
+        // candidates, every location/state read happens on the owning player's thread.
+        scheduledTasks.add(Scheduler.runAsyncTimer(() -> {
             if (!CelestCombatPro.hasWorldGuard) return;
 
-            List<UUID>          needPushBack = new ArrayList<>();
-            Map<UUID, Location> pushBackLocs = new HashMap<>();
-
             for (Player player : plugin.getServer().getOnlinePlayers()) {
-                UUID uuid  = player.getUniqueId();
-                World world = player.getWorld();
-
-                if (!combatManager.isInCombat(player) || !isEnabledInWorld(world)) {
+                if (!combatManager.isInCombat(player)) {
+                    UUID uuid = player.getUniqueId();
                     lastKnownPos.remove(uuid);
-
                     if (playerBarriers.containsKey(uuid)) {
                         barrierUpdateNeeded.add(uuid);
                     }
                     continue;
                 }
-
-                BorderCache cache = getCacheForWorld(world);
-                if (cache == null) continue;
-
-                Location loc = player.getLocation();
-                int bx = loc.getBlockX(), by = loc.getBlockY(), bz = loc.getBlockZ();
-                BlockPos current = BlockPos.of(world, bx, by, bz);
-                BlockPos last    = lastKnownPos.put(uuid, current);
-
-                boolean moved = !current.equals(last);
-                boolean currentlySafe = cache.isSafeZone(bx, by, bz);
-
-                if (moved && last != null) {
-                    boolean wasSafe = cache.isSafeZone(last.x(), last.y(), last.z());
-                    if (!wasSafe && currentlySafe) {
-
-                        Location pushTo = new Location(world,
-                                last.x() + 0.5, last.y(), last.z() + 0.5,
-                                loc.getYaw(), loc.getPitch());
-                        needPushBack.add(uuid);
-                        pushBackLocs.put(uuid, pushTo);
-                    }
-
-                    barrierUpdateNeeded.add(uuid);
-
-                } else if (currentlySafe && !moved) {
-
-                    if (!needPushBack.contains(uuid)) {
-                        needPushBack.add(uuid);
-                        pushBackLocs.put(uuid, loc.clone());
-                    }
-                }
+                Scheduler.runEntity(player, () -> processSafeZone(player));
             }
+        }, 1L, 2L));
 
-
-            for (UUID uuid : needPushBack) {
-                final Location pushTo = pushBackLocs.get(uuid);
-                if (pushTo == null) continue;
-                Player p = plugin.getServer().getPlayer(uuid);
-                if (p == null || !p.isOnline()) continue;
-                Scheduler.runEntityTask(p, () -> {
-                    if (!p.isOnline() || !combatManager.isInCombat(p)) return;
-                    pushPlayerBack(p, pushTo);
-                    sendCooldownMessage(p, "combat_no_safezone_entry");
-                });
-            }
-
-        }, 1L, 2L);  // initial delay 1 tick, period 2 ticks
-
-
-
-        Scheduler.runTaskTimerAsync(() -> {
+        scheduledTasks.add(Scheduler.runAsyncTimer(() -> {
             Set<UUID> queued = new HashSet<>(barrierUpdateNeeded);
             barrierUpdateNeeded.clear();
 
@@ -232,7 +184,7 @@ public class WorldGuardHook implements Listener {
                 Player p = plugin.getServer().getPlayer(uuid);
                 if (p == null || !p.isOnline()) continue;
 
-                Scheduler.runEntityTask(p, () -> {
+                Scheduler.runEntity(p, () -> {
                     if (!p.isOnline()) return;
                     if (!combatManager.isInCombat(p) || !isEnabledInWorld(p.getWorld())) {
                         removePlayerBarriers(p);
@@ -241,24 +193,74 @@ public class WorldGuardHook implements Listener {
                     }
                 });
             }
-        }, 5L, 5L);
+        }, 5L, 5L));
 
-
-
-        Scheduler.runTaskTimerAsync(() -> {
+        scheduledTasks.add(Scheduler.runAsyncTimer(() -> {
             for (BorderCache cache : borderCaches.values()) {
                 if (!isEnabledInWorld(cache.world)) continue;
                 if (cache.needsRebuild()) cache.rebuild();
             }
-        }, 20L, 20L);
+        }, 20L, 20L));
 
-
-        Scheduler.runTaskTimerAsync(() -> {
+        scheduledTasks.add(Scheduler.runAsyncTimer(() -> {
             long now = System.currentTimeMillis();
             cleanupPlayerBarriers();
             pearlThrowLocations.entrySet().removeIf(e -> e.getValue().isExpired());
             lastMessageTime.entrySet().removeIf(e -> now - e.getValue() > MESSAGE_COOLDOWN * 10);
-        }, 100L, 100L);
+        }, 100L, 100L));
+    }
+
+    private void cancelTasks() {
+        for (Scheduler.Task task : scheduledTasks) {
+            task.cancel();
+        }
+        scheduledTasks.clear();
+    }
+
+    /**
+     * Runs on the owning player's region thread and performs all safe-zone checks and
+     * push-backs for a single player.
+     */
+    private void processSafeZone(Player player) {
+        if (player == null || !player.isOnline()) return;
+
+        UUID uuid = player.getUniqueId();
+        World world = player.getWorld();
+
+        if (!combatManager.isInCombat(player) || !isEnabledInWorld(world)) {
+            lastKnownPos.remove(uuid);
+            if (playerBarriers.containsKey(uuid)) {
+                barrierUpdateNeeded.add(uuid);
+            }
+            return;
+        }
+
+        BorderCache cache = getCacheForWorld(world);
+        if (cache == null) return;
+
+        Location loc = player.getLocation();
+        int bx = loc.getBlockX(), by = loc.getBlockY(), bz = loc.getBlockZ();
+        BlockPos current = BlockPos.of(world, bx, by, bz);
+        BlockPos last = lastKnownPos.put(uuid, current);
+
+        boolean moved = !current.equals(last);
+        boolean currentlySafe = cache.isSafeZone(bx, by, bz);
+
+        if (moved && last != null) {
+            boolean wasSafe = cache.isSafeZone(last.x(), last.y(), last.z());
+            if (!wasSafe && currentlySafe) {
+                Location pushTo = new Location(world,
+                        last.x() + 0.5, last.y(), last.z() + 0.5,
+                        loc.getYaw(), loc.getPitch());
+                pushPlayerBack(player, pushTo);
+                sendCooldownMessage(player, "combat_no_safezone_entry");
+            }
+
+            barrierUpdateNeeded.add(uuid);
+        } else if (currentlySafe) {
+            pushPlayerBack(player, loc.clone());
+            sendCooldownMessage(player, "combat_no_safezone_entry");
+        }
     }
 
 
@@ -333,7 +335,7 @@ public class WorldGuardHook implements Listener {
         if (barriers != null && barriers.contains(clicked)) {
             event.setCancelled(true);
             pushPlayerAwayFromBarrier(player, clicked.toLocation(player.getWorld()));
-            Scheduler.runEntityTaskLater(player, () -> refreshBarrierBlock(clicked, player), 1L);
+            Scheduler.runEntityLater(player, () -> refreshBarrierBlock(clicked, player), 1L);
         }
     }
 
@@ -508,14 +510,15 @@ public class WorldGuardHook implements Listener {
         Location safe = from.clone();
         safe.setYaw(player.getLocation().getYaw());
         safe.setPitch(player.getLocation().getPitch());
-        player.teleportAsync(safe).thenAccept(ok -> {
-            if (ok) {
-                Scheduler.runEntityTask(player, () -> {
-                    try { player.setVelocity(new Vector(0, 0, 0)); }
-                    catch (Exception ignored) {}
-                });
-            }
-        });
+            player.teleportAsync(safe).thenAccept(ok -> {
+                if (ok) {
+                    Scheduler.runEntity(player, () -> {
+                        if (player.isOnline()) {
+                            player.setVelocity(new Vector(0, 0, 0));
+                        }
+                    });
+                }
+            });
     }
 
     private Location calculateTeleportDestination(ProjectileHitEvent event, Projectile proj) {
@@ -543,15 +546,22 @@ public class WorldGuardHook implements Listener {
     }
 
     private void handleFailedTeleport(Player player, Location origin) {
-        Location safe = findSafeLocation(origin);
-        if (safe != null) {
-            player.teleportAsync(safe);
-            sendCooldownMessage(player, "combat_no_pearl_safezone");
-        } else {
-            player.setHealth(0);
-            plugin.getLogger().warning("Killed " + player.getName() + " — no safe location found.");
-            sendCooldownMessage(player, "combat_killed_no_safe_location");
-        }
+        // Block lookups must run on the region that owns the origin location
+        Scheduler.runRegion(origin, () -> {
+            Location safe = findSafeLocation(origin);
+            if (safe != null) {
+                player.teleportAsync(safe);
+                sendCooldownMessage(player, "combat_no_pearl_safezone");
+            } else {
+                Scheduler.runEntity(player, () -> {
+                    if (player.isOnline()) {
+                        player.setHealth(0);
+                    }
+                });
+                plugin.getLogger().warning("Killed " + player.getName() + " — no safe location found.");
+                sendCooldownMessage(player, "combat_killed_no_safe_location");
+            }
+        });
     }
 
 
@@ -588,28 +598,31 @@ public class WorldGuardHook implements Listener {
 
 
     private void cleanupPlayerBarriers() {
-        playerBarriers.entrySet().removeIf(entry -> {
-            Player player = plugin.getServer().getPlayer(entry.getKey());
+        for (UUID uuid : new ArrayList<>(playerBarriers.keySet())) {
+            Player player = plugin.getServer().getPlayer(uuid);
             boolean shouldRemove = player == null || !player.isOnline()
                     || !combatManager.isInCombat(player)
                     || !isEnabledInWorld(player.getWorld());
-            if (!shouldRemove) return false;
+            if (!shouldRemove) continue;
+
+            Set<BlockPos> barriers = playerBarriers.remove(uuid);
+            if (barriers == null || barriers.isEmpty()) continue;
 
             if (player != null && player.isOnline()) {
-                entry.getValue().forEach(pos -> removeBarrierBlock(pos, player));
+                // Block packets must be sent from the owning region thread
+                Scheduler.runEntity(player, () -> barriers.forEach(pos -> removeBarrierBlock(pos, player)));
             } else {
-                entry.getValue().forEach(pos -> {
+                barriers.forEach(pos -> {
                     Set<UUID> viewers = barrierViewers.get(pos);
                     if (viewers == null) return;
-                    viewers.remove(entry.getKey());
+                    viewers.remove(uuid);
                     if (viewers.isEmpty()) {
                         barrierViewers.remove(pos);
                         originalBlocks.remove(pos);
                     }
                 });
             }
-            return true;
-        });
+        }
     }
 
 
@@ -620,13 +633,18 @@ public class WorldGuardHook implements Listener {
 
     private void sendCooldownMessage(Player player, String key) {
         long now  = System.currentTimeMillis();
-        Long last = lastMessageTime.get(player.getUniqueId());
+        UUID uuid = player.getUniqueId();
+        Long last = lastMessageTime.get(uuid);
         if (last != null && now - last < MESSAGE_COOLDOWN) return;
-        lastMessageTime.put(player.getUniqueId(), now);
-        Map<String, String> ph = new HashMap<>();
-        ph.put("player", player.getName());
-        ph.put("time", String.valueOf(combatManager.getRemainingCombatTime(player)));
-        plugin.getMessageService().sendMessage(player, key, ph);
+        lastMessageTime.put(uuid, now);
+
+        String playerName = player.getName();
+        Scheduler.runEntity(player, () -> {
+            Map<String, String> ph = new HashMap<>();
+            ph.put("player", playerName);
+            ph.put("time", String.valueOf(combatManager.getRemainingCombatTime(player)));
+            plugin.getMessageService().sendMessage(player, key, ph);
+        });
     }
 
 
@@ -649,6 +667,7 @@ public class WorldGuardHook implements Listener {
 
 
     public void cleanup() {
+        cancelTasks();
         borderCaches.clear();
         playerBarriers.clear();
         originalBlocks.clear();

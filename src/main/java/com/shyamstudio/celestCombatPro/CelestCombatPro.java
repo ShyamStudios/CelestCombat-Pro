@@ -34,7 +34,8 @@ public final class CelestCombatPro extends JavaPlugin {
   public static CelestCombatPro getInstance() {
     return instance;
   }
-  private final boolean debugMode = getConfig().getBoolean("debug", false);
+
+  private volatile boolean debugMode = false;
   private MessageManager messageManager;
   private UpdateChecker updateChecker;
   private ConfigUpdater configUpdater;
@@ -54,6 +55,7 @@ public final class CelestCombatPro extends JavaPlugin {
   private CombatAPIImpl combatAPI;
   private CelestCombatExpansion placeholderExpansion;
   private DynamicEventHandler dynamicEventHandler;
+  private Metrics metrics;
 
   public static boolean hasWorldGuard = false;
   public static boolean hasGriefPrevention = false;
@@ -65,7 +67,11 @@ public final class CelestCombatPro extends JavaPlugin {
     long startTime = System.currentTimeMillis();
     instance = this;
 
+    // The scheduler must be bound before any manager schedules its own tasks
+    Scheduler.init(this);
+
     saveDefaultConfig();
+    debugMode = getConfig().getBoolean("debug", false);
     checkProtectionPlugins();
 
     messageManager = new MessageManager(this);
@@ -78,33 +84,23 @@ public final class CelestCombatPro extends JavaPlugin {
     combatManager = new CombatManager(this);
     killRewardManager = new KillRewardManager(this);
     newbieProtectionManager = new NewbieProtectionManager(this);
-    
-    // Initialize dynamic event handler system
-    dynamicEventHandler = new DynamicEventHandler(this);
-    dynamicEventHandler.registerHandlers();
-    
-    // Register static event handlers (ones that don't need configurable priorities)
+
+    // Create all listeners before the dynamic handler so it can register them
     combatListeners = new CombatListeners(this);
-    // Note: Some methods in combatListeners are now registered dynamically
-    getServer().getPluginManager().registerEvents(combatListeners, this);
-
     enderPearlListener = new EnderPearlListener(this, combatManager);
-    // Note: Some methods in enderPearlListener are now registered dynamically
-    getServer().getPluginManager().registerEvents(enderPearlListener, this);
-
     tridentListener = new TridentListener(this, combatManager);
-    getServer().getPluginManager().registerEvents(tridentListener, this);
-
-    // Note: Some methods in ItemRestrictionListener are now registered dynamically
     itemRestrictionListener = new ItemRestrictionListener(this, combatManager);
-    getServer().getPluginManager().registerEvents(itemRestrictionListener, this);
+
+    // TridentListener uses static annotations; everything else is registered by
+    // DynamicEventHandler so priorities stay configurable and instances are shared.
+    getServer().getPluginManager().registerEvents(tridentListener, this);
 
     // WorldGuard integration
     if (hasWorldGuard && getConfig().getBoolean("safezone_protection.enabled", true)) {
       worldGuardHook = new WorldGuardHook(this, combatManager);
       getServer().getPluginManager().registerEvents(worldGuardHook, this);
       debug("WorldGuard safezone protection enabled");
-    } else if(hasWorldGuard) {
+    } else if (hasWorldGuard) {
       getLogger().info("Found WorldGuard but safe zone barrier is disabled in config.");
     }
 
@@ -113,7 +109,7 @@ public final class CelestCombatPro extends JavaPlugin {
       griefPreventionHook = new GriefPreventionHook(this, combatManager);
       getServer().getPluginManager().registerEvents(griefPreventionHook, this);
       debug("GriefPrevention claim protection enabled");
-    } else if(hasGriefPrevention) {
+    } else if (hasGriefPrevention) {
       getLogger().info("Found GriefPrevention but claim protection is disabled in config.");
     }
 
@@ -122,9 +118,13 @@ public final class CelestCombatPro extends JavaPlugin {
       uxmClaimsHook = new UXMClaimsHook(this, combatManager);
       getServer().getPluginManager().registerEvents(uxmClaimsHook, this);
       debug("UXM Claims protection enabled");
-    } else if(hasUXMClaims) {
+    } else if (hasUXMClaims) {
       getLogger().info("Found UXM Claims but claim protection is disabled in config.");
     }
+
+    // Register the configurable event handler set
+    dynamicEventHandler = new DynamicEventHandler(this);
+    dynamicEventHandler.registerHandlers();
 
     commandManager = new CommandManager(this);
     commandManager.registerCommands();
@@ -157,12 +157,12 @@ public final class CelestCombatPro extends JavaPlugin {
     if (dynamicEventHandler != null) {
       dynamicEventHandler.unregisterHandlers();
     }
-    
+
     if (combatManager != null) {
       combatManager.shutdown();
     }
 
-    if(combatListeners != null) {
+    if (combatListeners != null) {
       combatListeners.shutdown();
     }
 
@@ -204,16 +204,24 @@ public final class CelestCombatPro extends JavaPlugin {
 
     CelestCombatAPI.shutdown();
 
+    if (metrics != null) {
+      metrics.shutdown();
+      metrics = null;
+    }
+
+    // Final safety net: no plugin task may survive a disable/reload cycle
+    Scheduler.cancelAll(this);
+
     getLogger().info("CelestCombat has been disabled!");
   }
 
   private void checkProtectionPlugins() {
     boolean wgPluginFound = isPluginEnabled("WorldGuard");
     boolean wgAPIAvailable = isWorldGuardAPIAvailable();
-    
+
     getLogger().info("[Protection Check] WorldGuard plugin found: " + wgPluginFound);
     getLogger().info("[Protection Check] WorldGuard API available: " + wgAPIAvailable);
-    
+
     hasWorldGuard = wgPluginFound && wgAPIAvailable;
     if (hasWorldGuard) {
       getLogger().info("WorldGuard integration enabled successfully!");
@@ -268,9 +276,8 @@ public final class CelestCombatPro extends JavaPlugin {
     }
   }
 
-
   private void setupBstatsMetrics() {
-    Scheduler.runTask(() -> new Metrics(this, 27299));
+    this.metrics = new Metrics(this, 27299);
   }
 
   public long getTimeFromConfig(String path, String defaultValue) {
@@ -294,39 +301,71 @@ public final class CelestCombatPro extends JavaPlugin {
     }
   }
 
+  /**
+   * Full plugin reload: refreshes configuration, all caches and re-registers
+   * dynamic handlers. All cached values are refreshed before consumers re-read them.
+   */
   public void reload() {
-    // Reload configuration first
     reloadConfig();
-    
-    // Reload combat manager (which includes event priority manager)
+    debugMode = getConfig().getBoolean("debug", false);
+
+    // Time values feed the managers below, so drop the cache before they reload
+    if (timeFormatter != null) {
+      timeFormatter.clearCache();
+    }
+
     if (combatManager != null) {
       combatManager.reloadConfig();
     }
-    
-    // Re-register dynamic event handlers with new priorities
-    if (dynamicEventHandler != null) {
-      dynamicEventHandler.registerHandlers();
+
+    if (killRewardManager != null) {
+      killRewardManager.loadConfig();
     }
-    
+
+    if (newbieProtectionManager != null) {
+      newbieProtectionManager.reloadConfig();
+    }
+
+    if (combatListeners != null) {
+      combatListeners.reload();
+    }
+
+    if (itemRestrictionListener != null) {
+      itemRestrictionListener.reloadConfig();
+    }
+
+    if (deathAnimationManager != null) {
+      deathAnimationManager.reloadConfig();
+    }
+
     if (messageManager != null) {
       messageManager.reload();
     }
 
     if (worldGuardHook != null) {
-      worldGuardHook.cleanup();
+      worldGuardHook.reloadConfig();
     }
 
     if (griefPreventionHook != null) {
-      griefPreventionHook.cleanup();
+      griefPreventionHook.reloadConfig();
     }
-    
-    debug("Plugin reloaded with new event priorities");
+
+    if (uxmClaimsHook != null) {
+      uxmClaimsHook.reloadConfig();
+    }
+
+    // Re-register dynamic event handlers with new priorities
+    if (dynamicEventHandler != null) {
+      dynamicEventHandler.registerHandlers();
+    }
+
+    debug("Plugin reloaded successfully");
   }
 
   public MessageManager getMessageService() {
     return messageManager;
   }
-  
+
   public DynamicEventHandler getDynamicEventHandler() {
     return dynamicEventHandler;
   }

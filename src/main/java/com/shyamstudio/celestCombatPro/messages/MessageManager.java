@@ -11,14 +11,22 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.io.File;
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MessageManager {
     private final JavaPlugin plugin;
-    private FileConfiguration messages;
+    private volatile FileConfiguration messages;
     private static final Map<String, String> EMPTY_PLACEHOLDERS = Collections.emptyMap();
     private static final Pattern HEX_PATTERN = Pattern.compile("&#([A-Fa-f0-9]{6})");
+
+    // Colorized templates are computed once per reload; placeholders are applied afterwards
+    private final Map<String, String> chatTemplates = new ConcurrentHashMap<>();
+    private final Map<String, String> titleTemplates = new ConcurrentHashMap<>();
+    private final Map<String, String> subtitleTemplates = new ConcurrentHashMap<>();
+    private final Map<String, String> actionBarTemplates = new ConcurrentHashMap<>();
+    private final Map<String, String> sounds = new ConcurrentHashMap<>();
 
     public MessageManager(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -31,6 +39,12 @@ public class MessageManager {
             plugin.saveResource("messages.yml", false);
         }
         messages = YamlConfiguration.loadConfiguration(messagesFile);
+
+        chatTemplates.clear();
+        titleTemplates.clear();
+        subtitleTemplates.clear();
+        actionBarTemplates.clear();
+        sounds.clear();
     }
 
     public void reload() {
@@ -50,7 +64,12 @@ public class MessageManager {
     }
 
     public void sendMessage(CommandSender sender, String key, Map<String, String> placeholders) {
-        if (!messages.contains(key)) {
+        if (sender instanceof Player player && !player.isOnline()) {
+            return;
+        }
+
+        FileConfiguration config = messages;
+        if (!config.contains(key)) {
             // Fallback: send hardcoded message with key name
             String fallbackMessage = "&c[CelestCombat] &7Message not configured: &e" + key;
             sender.sendMessage(translateColors(fallbackMessage));
@@ -59,40 +78,48 @@ public class MessageManager {
         }
 
         // Check if message is enabled
-        if (messages.contains(key + ".enabled") && !messages.getBoolean(key + ".enabled")) {
+        if (config.contains(key + ".enabled") && !config.getBoolean(key + ".enabled")) {
             return;
         }
 
         // Send chat message
-        String message = messages.getString(key + ".message");
+        String message = config.getString(key + ".message");
         if (message != null) {
-            String prefix = messages.getString("prefix", "");
-            message = prefix + message;
-            message = applyPlaceholders(message, placeholders);
-            message = translateColors(message);
-            sender.sendMessage(message);
+            String template = chatTemplates.get(key);
+            if (template == null) {
+                template = translateColors(config.getString("prefix", "") + message);
+                chatTemplates.put(key, template);
+            }
+            sender.sendMessage(applyPlaceholders(template, placeholders));
         }
 
         // Player-specific features
         if (sender instanceof Player player) {
             // Title and subtitle
-            String title = messages.getString(key + ".title");
-            String subtitle = messages.getString(key + ".subtitle");
+            String title = getTemplate(config, titleTemplates, key, ".title");
+            String subtitle = getTemplate(config, subtitleTemplates, key, ".subtitle");
             if (title != null || subtitle != null) {
-                title = title != null ? translateColors(applyPlaceholders(title, placeholders)) : "";
-                subtitle = subtitle != null ? translateColors(applyPlaceholders(subtitle, placeholders)) : "";
-                player.sendTitle(title, subtitle, 10, 70, 20);
+                String finalTitle = title != null ? applyPlaceholders(title, placeholders) : "";
+                String finalSubtitle = subtitle != null ? applyPlaceholders(subtitle, placeholders) : "";
+                player.sendTitle(finalTitle, finalSubtitle, 10, 70, 20);
             }
 
             // Action bar
-            String actionBar = messages.getString(key + ".action_bar");
+            String actionBar = getTemplate(config, actionBarTemplates, key, ".action_bar");
             if (actionBar != null) {
-                actionBar = translateColors(applyPlaceholders(actionBar, placeholders));
-                player.spigot().sendMessage(ChatMessageType.ACTION_BAR, TextComponent.fromLegacyText(actionBar));
+                player.spigot().sendMessage(ChatMessageType.ACTION_BAR,
+                        TextComponent.fromLegacyText(applyPlaceholders(actionBar, placeholders)));
             }
 
             // Sound
-            String sound = messages.getString(key + ".sound");
+            String sound = sounds.get(key);
+            if (sound == null) {
+                String configured = config.getString(key + ".sound");
+                if (configured != null) {
+                    sounds.put(key, configured);
+                    sound = configured;
+                }
+            }
             if (sound != null) {
                 try {
                     player.playSound(player.getLocation(), sound, 1.0f, 1.0f);
@@ -101,6 +128,20 @@ public class MessageManager {
                 }
             }
         }
+    }
+
+    private String getTemplate(FileConfiguration config, Map<String, String> cache, String key, String suffix) {
+        String cached = cache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        String raw = config.getString(key + suffix);
+        if (raw == null) {
+            return null;
+        }
+        String colorized = translateColors(raw);
+        cache.put(key, colorized);
+        return colorized;
     }
 
     private String applyPlaceholders(String text, Map<String, String> placeholders) {

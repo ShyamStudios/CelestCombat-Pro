@@ -45,26 +45,26 @@ public class UXMClaimsHook implements Listener {
     private Method findMemberByUidMethod;
     private Method getClaimTypeMethod;
     
-    // Configuration cache
-    private boolean preventClaimEntry;
-    private boolean preventCombatInClaims;
-    private boolean allowOwnerCombat;
-    private boolean allowTrustedCombat;
-    private boolean preventTeleportEntry;
-    private boolean blockCombatItems;
-    private boolean blockCommandsInClaims;
-    private boolean disableFlightInClaims;
-    private double pushBackForce;
-    private boolean sendEntryBlockedMessage;
-    private boolean sendCombatBlockedMessage;
-    private boolean sendTeleportBlockedMessage;
-    private long messageCooldown;
+    // Configuration cache (written on reload, read on region threads)
+    private volatile boolean preventClaimEntry;
+    private volatile boolean preventCombatInClaims;
+    private volatile boolean allowOwnerCombat;
+    private volatile boolean allowTrustedCombat;
+    private volatile boolean preventTeleportEntry;
+    private volatile boolean blockCombatItems;
+    private volatile boolean blockCommandsInClaims;
+    private volatile boolean disableFlightInClaims;
+    private volatile double pushBackForce;
+    private volatile boolean sendEntryBlockedMessage;
+    private volatile boolean sendCombatBlockedMessage;
+    private volatile boolean sendTeleportBlockedMessage;
+    private volatile long messageCooldown;
     
     // Cache settings
-    private boolean cacheEnabled;
-    private long cacheTTL;
-    private int maxCacheSize;
-    private long cleanupInterval;
+    private volatile boolean cacheEnabled;
+    private volatile long cacheTTL;
+    private volatile int maxCacheSize;
+    private volatile long cleanupInterval;
     
     // Message cooldown tracking
     private final Map<UUID, Long> lastEntryMessageTime = new ConcurrentHashMap<>();
@@ -74,6 +74,7 @@ public class UXMClaimsHook implements Listener {
     // Claim cache for performance
     private final Map<String, ClaimCacheEntry> claimCache = new ConcurrentHashMap<>();
     private long lastCacheClean = System.currentTimeMillis();
+    private Scheduler.Task cleanupTask;
     
     public UXMClaimsHook(CelestCombatPro plugin, CombatManager combatManager) {
         this.plugin = plugin;
@@ -290,12 +291,16 @@ public class UXMClaimsHook implements Listener {
         }
         
         Player player = event.getPlayer();
-        
+
         // Only process if player is in combat
         if (!combatManager.isInCombat(player)) {
             return;
         }
-        
+
+        if (event.getTo() == null || event.getTo().getWorld() == null) {
+            return;
+        }
+
         // Only process if enabled in this world
         if (!combatManager.isUXMClaimsEnabledInWorld(event.getTo().getWorld().getName())) {
             return;
@@ -454,7 +459,11 @@ public class UXMClaimsHook implements Listener {
     }
     
     private void startCleanupTask() {
-        Scheduler.runTaskTimerAsync(() -> {
+        if (cleanupTask != null) {
+            cleanupTask.cancel();
+        }
+
+        cleanupTask = Scheduler.runAsyncTimer(() -> {
             cleanCacheIfNeeded();
 
             long currentTime = System.currentTimeMillis();
@@ -466,8 +475,12 @@ public class UXMClaimsHook implements Listener {
                 currentTime - entry.getValue() > messageCooldown * 5);
         }, 20L * 30L, 20L * 30L);
     }
-    
+
     public void cleanup() {
+        if (cleanupTask != null) {
+            cleanupTask.cancel();
+            cleanupTask = null;
+        }
         claimCache.clear();
         lastEntryMessageTime.clear();
         lastCombatMessageTime.clear();

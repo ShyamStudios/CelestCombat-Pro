@@ -3,264 +3,167 @@ package com.shyamstudio.celestCombatPro.listeners;
 import com.shyamstudio.celestCombatPro.CelestCombatPro;
 import com.shyamstudio.celestCombatPro.configs.EventPriorityManager;
 import org.bukkit.Bukkit;
+import org.bukkit.event.Event;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.event.entity.ProjectileLaunchEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerKickEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.player.PlayerToggleFlightEvent;
 import org.bukkit.plugin.EventExecutor;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Level;
 
 /**
- * Handles dynamic registration of event handlers with configurable priorities
- * This allows event priorities to be changed via configuration and reloaded
+ * Registers every listener method through a single code path so that configurable event
+ * priorities can be applied and changed on reload.
+ *
+ * <p>All handler methods use the plugin's long-lived listener instances. Creating fresh
+ * listener instances per registration (as the previous implementation did) split shared
+ * combat state such as {@code lastDamageSource} across multiple objects.
  */
 public class DynamicEventHandler {
-    
+
     private final CelestCombatPro plugin;
     private final EventPriorityManager priorityManager;
-    private final Map<String, RegisteredHandler> registeredHandlers;
-    
+    private final Map<String, RegisteredHandler> registeredHandlers = new HashMap<>();
+
     public DynamicEventHandler(CelestCombatPro plugin) {
         this.plugin = plugin;
         this.priorityManager = plugin.getCombatManager().getEventPriorityManager();
-        this.registeredHandlers = new HashMap<>();
     }
-    
+
     /**
      * Register all dynamic event handlers with configurable priorities
      */
     public void registerHandlers() {
-        // Unregister existing handlers first
         unregisterHandlers();
-        
-        // Register command blocking handler
-        registerCommandHandler();
-        
-        // Register other handlers that need configurable priorities
-        registerCombatDamageHandler();
-        registerPlayerMovementHandler();
-        registerTeleportationHandler();
-        registerItemUsageHandler();
-        registerFlightControlHandler();
-        
-        if (plugin.getConfig().getBoolean("debug", false)) {
+
+        CombatListeners combatListeners = plugin.getCombatListeners();
+        ItemRestrictionListener itemRestrictionListener = plugin.getItemRestrictionListener();
+        EnderPearlListener enderPearlListener = plugin.getEnderPearlListener();
+
+        if (combatListeners == null || itemRestrictionListener == null || enderPearlListener == null) {
+            plugin.getLogger().severe("Cannot register event handlers: listeners are not initialized");
+            return;
+        }
+
+        // Configurable priorities
+        register("command_blocking", combatListeners, PlayerCommandPreprocessEvent.class,
+                "onPlayerCommand", priorityManager.getPriority("command_blocking"), true);
+        register("combat_damage", combatListeners, EntityDamageByEntityEvent.class,
+                "onEntityDamageByEntity", priorityManager.getPriority("combat_damage"), true);
+        register("flight_control", combatListeners, PlayerToggleFlightEvent.class,
+                "onPlayerToggleFlight", priorityManager.getPriority("flight_control"), true);
+        register("teleportation", enderPearlListener, PlayerTeleportEvent.class,
+                "onEnderPearlTeleport", priorityManager.getPriority("teleportation"), true);
+        register("item_usage", itemRestrictionListener, PlayerItemConsumeEvent.class,
+                "onPlayerItemConsume", priorityManager.getPriority("item_usage"), true);
+
+        // Fixed lifecycle priorities
+        register("combat_safezone_damage", combatListeners, EntityDamageEvent.class,
+                "onEntityDamage", EventPriority.HIGH, true);
+        register("combat_join", combatListeners, PlayerJoinEvent.class,
+                "onPlayerJoin", EventPriority.NORMAL, false);
+        register("combat_quit", combatListeners, PlayerQuitEvent.class,
+                "onPlayerQuit", EventPriority.HIGHEST, false);
+        register("combat_kick", combatListeners, PlayerKickEvent.class,
+                "onPlayerKick", EventPriority.MONITOR, false);
+        register("combat_death", combatListeners, PlayerDeathEvent.class,
+                "onPlayerDeath", EventPriority.MONITOR, false);
+        register("item_move", itemRestrictionListener, PlayerMoveEvent.class,
+                "onPlayerMoveEvent", EventPriority.HIGH, true);
+        register("item_inventory", itemRestrictionListener, InventoryClickEvent.class,
+                "onInventoryClick", EventPriority.HIGH, true);
+        register("item_flight", itemRestrictionListener, PlayerToggleFlightEvent.class,
+                "onPlayerToggleFlight", EventPriority.HIGH, true);
+        register("pearl_use", enderPearlListener, PlayerInteractEvent.class,
+                "onEnderPearlUse", EventPriority.HIGH, true);
+        register("pearl_launch", enderPearlListener, ProjectileLaunchEvent.class,
+                "onProjectileLaunch", EventPriority.HIGH, true);
+        register("pearl_hit", enderPearlListener, ProjectileHitEvent.class,
+                "onProjectileHit", EventPriority.MONITOR, true);
+        register("pearl_quit", enderPearlListener, PlayerQuitEvent.class,
+                "onPlayerQuit", EventPriority.MONITOR, false);
+
+        if (plugin.isDebugMode()) {
             plugin.getLogger().info("Registered " + registeredHandlers.size() + " dynamic event handlers");
         }
     }
-    
+
     /**
      * Unregister all dynamic event handlers
      */
     public void unregisterHandlers() {
+        if (registeredHandlers.isEmpty()) {
+            return;
+        }
+        Set<Listener> uniqueListeners = new HashSet<>();
         for (RegisteredHandler handler : registeredHandlers.values()) {
-            HandlerList.unregisterAll(handler.listener);
+            uniqueListeners.add(handler.listener);
+        }
+        for (Listener listener : uniqueListeners) {
+            HandlerList.unregisterAll(listener);
         }
         registeredHandlers.clear();
-        
-        if (plugin.getConfig().getBoolean("debug", false)) {
+
+        if (plugin.isDebugMode()) {
             plugin.getLogger().info("Unregistered all dynamic event handlers");
         }
     }
-    
-    private void registerCommandHandler() {
-        EventPriority priority = priorityManager.getPriority("command_blocking");
-        CombatListeners listener = new CombatListeners(plugin);
-        
+
+    private <T extends Event> void register(String id, Listener listener, Class<T> eventClass,
+                                            String methodName, EventPriority priority, boolean ignoreCancelled) {
         try {
-            Method method = CombatListeners.class.getDeclaredMethod("onPlayerCommand", 
-                org.bukkit.event.player.PlayerCommandPreprocessEvent.class);
-            
-            EventExecutor executor = (l, event) -> {
+            Method method = listener.getClass().getDeclaredMethod(methodName, eventClass);
+            method.setAccessible(true);
+
+            EventExecutor executor = (executingListener, event) -> {
+                if (!eventClass.isInstance(event)) {
+                    return;
+                }
                 try {
-                    if (event instanceof org.bukkit.event.player.PlayerCommandPreprocessEvent) {
-                        method.invoke(l, event);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.SEVERE, "Error executing command handler", e);
+                    method.invoke(executingListener, event);
+                } catch (InvocationTargetException e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    plugin.getLogger().log(Level.SEVERE, "Error executing event handler '" + id + "'", cause);
+                } catch (ReflectiveOperationException e) {
+                    plugin.getLogger().log(Level.SEVERE, "Error invoking event handler '" + id + "'", e);
                 }
             };
-            
-            Bukkit.getPluginManager().registerEvent(
-                org.bukkit.event.player.PlayerCommandPreprocessEvent.class,
-                listener,
-                priority,
-                executor,
-                plugin,
-                true // ignoreCancelled
-            );
-            
-            registeredHandlers.put("command_blocking", new RegisteredHandler(listener, priority));
-            
-            if (plugin.getConfig().getBoolean("debug", false)) {
-                plugin.getLogger().info("Registered command blocking handler with priority: " + priority.name());
+
+            Bukkit.getPluginManager().registerEvent(eventClass, listener, priority, executor, plugin, ignoreCancelled);
+            registeredHandlers.put(id, new RegisteredHandler(listener, priority));
+
+            if (plugin.isDebugMode()) {
+                plugin.getLogger().info("Registered event handler '" + id + "' with priority " + priority.name());
             }
-            
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to register command handler", e);
+        } catch (NoSuchMethodException e) {
+            plugin.getLogger().log(Level.SEVERE,
+                    "Failed to register event handler '" + id + "': method " + methodName + " not found", e);
+        } catch (Throwable t) {
+            plugin.getLogger().log(Level.SEVERE, "Failed to register event handler '" + id + "'", t);
         }
     }
-    
-    private void registerCombatDamageHandler() {
-        EventPriority priority = priorityManager.getPriority("combat_damage");
-        CombatListeners listener = new CombatListeners(plugin);
-        
-        try {
-            // Register EntityDamageByEntityEvent handler
-            Method method = CombatListeners.class.getDeclaredMethod("onEntityDamageByEntity", 
-                org.bukkit.event.entity.EntityDamageByEntityEvent.class);
-            
-            EventExecutor executor = (l, event) -> {
-                try {
-                    if (event instanceof org.bukkit.event.entity.EntityDamageByEntityEvent) {
-                        method.invoke(l, event);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.SEVERE, "Error executing combat damage handler", e);
-                }
-            };
-            
-            Bukkit.getPluginManager().registerEvent(
-                org.bukkit.event.entity.EntityDamageByEntityEvent.class,
-                listener,
-                priority,
-                executor,
-                plugin,
-                true // ignoreCancelled
-            );
-            
-            registeredHandlers.put("combat_damage", new RegisteredHandler(listener, priority));
-            
-            if (plugin.getConfig().getBoolean("debug", false)) {
-                plugin.getLogger().info("Registered combat damage handler with priority: " + priority.name());
-            }
-            
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to register combat damage handler", e);
-        }
-    }
-    
-    private void registerPlayerMovementHandler() {
-        // This would be for movement-related handlers if needed
-        // Currently not implemented as movement handlers are in protection hooks
-    }
-    
-    private void registerTeleportationHandler() {
-        EventPriority priority = priorityManager.getPriority("teleportation");
-        EnderPearlListener listener = new EnderPearlListener(plugin, plugin.getCombatManager());
-        
-        try {
-            Method method = EnderPearlListener.class.getDeclaredMethod("onEnderPearlTeleport", 
-                org.bukkit.event.player.PlayerTeleportEvent.class);
-            
-            EventExecutor executor = (l, event) -> {
-                try {
-                    if (event instanceof org.bukkit.event.player.PlayerTeleportEvent) {
-                        method.invoke(l, event);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.SEVERE, "Error executing teleportation handler", e);
-                }
-            };
-            
-            Bukkit.getPluginManager().registerEvent(
-                org.bukkit.event.player.PlayerTeleportEvent.class,
-                listener,
-                priority,
-                executor,
-                plugin,
-                true // ignoreCancelled
-            );
-            
-            registeredHandlers.put("teleportation", new RegisteredHandler(listener, priority));
-            
-            if (plugin.getConfig().getBoolean("debug", false)) {
-                plugin.getLogger().info("Registered teleportation handler with priority: " + priority.name());
-            }
-            
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to register teleportation handler", e);
-        }
-    }
-    
-    private void registerItemUsageHandler() {
-        EventPriority priority = priorityManager.getPriority("item_usage");
-        ItemRestrictionListener listener = new ItemRestrictionListener(plugin, plugin.getCombatManager());
-        
-        try {
-            Method method = ItemRestrictionListener.class.getDeclaredMethod("onPlayerItemConsume", 
-                org.bukkit.event.player.PlayerItemConsumeEvent.class);
-            
-            EventExecutor executor = (l, event) -> {
-                try {
-                    if (event instanceof org.bukkit.event.player.PlayerItemConsumeEvent) {
-                        method.invoke(l, event);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.SEVERE, "Error executing item usage handler", e);
-                }
-            };
-            
-            Bukkit.getPluginManager().registerEvent(
-                org.bukkit.event.player.PlayerItemConsumeEvent.class,
-                listener,
-                priority,
-                executor,
-                plugin,
-                true // ignoreCancelled
-            );
-            
-            registeredHandlers.put("item_usage", new RegisteredHandler(listener, priority));
-            
-            if (plugin.getConfig().getBoolean("debug", false)) {
-                plugin.getLogger().info("Registered item usage handler with priority: " + priority.name());
-            }
-            
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to register item usage handler", e);
-        }
-    }
-    
-    private void registerFlightControlHandler() {
-        EventPriority priority = priorityManager.getPriority("flight_control");
-        CombatListeners listener = new CombatListeners(plugin);
-        
-        try {
-            Method method = CombatListeners.class.getDeclaredMethod("onPlayerToggleFlight", 
-                org.bukkit.event.player.PlayerToggleFlightEvent.class);
-            
-            EventExecutor executor = (l, event) -> {
-                try {
-                    if (event instanceof org.bukkit.event.player.PlayerToggleFlightEvent) {
-                        method.invoke(l, event);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.SEVERE, "Error executing flight control handler", e);
-                }
-            };
-            
-            Bukkit.getPluginManager().registerEvent(
-                org.bukkit.event.player.PlayerToggleFlightEvent.class,
-                listener,
-                priority,
-                executor,
-                plugin,
-                true // ignoreCancelled
-            );
-            
-            registeredHandlers.put("flight_control", new RegisteredHandler(listener, priority));
-            
-            if (plugin.getConfig().getBoolean("debug", false)) {
-                plugin.getLogger().info("Registered flight control handler with priority: " + priority.name());
-            }
-            
-        } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to register flight control handler", e);
-        }
-    }
-    
+
     /**
      * Get current priority for a specific handler
      */
@@ -268,7 +171,7 @@ public class DynamicEventHandler {
         RegisteredHandler handler = registeredHandlers.get(handlerType);
         return handler != null ? handler.priority : null;
     }
-    
+
     /**
      * Get debug information about registered handlers
      */
@@ -279,14 +182,14 @@ public class DynamicEventHandler {
         }
         return result;
     }
-    
+
     /**
      * Internal class to track registered handlers
      */
     private static class RegisteredHandler {
         final Listener listener;
         final EventPriority priority;
-        
+
         RegisteredHandler(Listener listener, EventPriority priority) {
             this.listener = listener;
             this.priority = priority;

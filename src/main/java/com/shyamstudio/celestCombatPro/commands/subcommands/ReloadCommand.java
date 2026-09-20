@@ -23,29 +23,8 @@ public class ReloadCommand extends BaseCommand {
 
         Map<String, String> placeholders = new HashMap<>();
 
+        // A single reload entry point refreshes config, caches and dynamic handlers
         plugin.reload();
-
-        // Reload config
-        plugin.reloadConfig();
-        plugin.getMessageService().reload();
-        plugin.refreshTimeCache();
-
-        if (plugin.getWorldGuardHook() != null) {
-            plugin.getWorldGuardHook().reloadConfig();
-        }
-        if (plugin.getGriefPreventionHook() != null) {
-            plugin.getGriefPreventionHook().reloadConfig();
-        }
-        if (plugin.getUxmClaimsHook() != null) {
-            plugin.getUxmClaimsHook().reloadConfig();
-        }
-
-        // Reload combat manager configuration
-        plugin.getCombatManager().reloadConfig();
-        plugin.getKillRewardManager().loadConfig();
-        plugin.getNewbieProtectionManager().reloadConfig();
-        plugin.getCombatListeners().reload();
-        plugin.getItemRestrictionListener().reloadConfig();
 
         // Send success message
         messageService.sendMessage(sender, "config_reloaded", placeholders);

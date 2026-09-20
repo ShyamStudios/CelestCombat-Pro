@@ -1,11 +1,13 @@
 package com.shyamstudio.celestCombatPro.listeners;
 
 import com.shyamstudio.celestCombatPro.CelestCombatPro;
+import com.shyamstudio.celestCombatPro.Scheduler;
 import com.shyamstudio.celestCombatPro.combat.DeathAnimationManager;
 import com.shyamstudio.celestCombatPro.messages.MessageManager;
 import com.shyamstudio.celestCombatPro.protection.NewbieProtectionManager;
 import com.shyamstudio.celestCombatPro.rewards.KillRewardManager;
 import com.shyamstudio.celestCombatPro.api.CelestCombatAPI;
+import com.shyamstudio.celestCombatPro.api.CombatAPI;
 import com.shyamstudio.celestCombatPro.api.events.PreCombatEvent;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -22,9 +24,14 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerToggleFlightEvent;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -42,12 +49,19 @@ public class CombatListeners implements Listener {
     private static final long DAMAGE_RECORD_CLEANUP_THRESHOLD = TimeUnit.MINUTES.toMillis(5);
 
     // Cached combat-logout config (avoid repeated getConfig() calls per-event)
-    private boolean combatLogoutEnabled;
-    private boolean combatLogoutKillPlayer;
-    private boolean combatLogoutRewardAttacker;
-    private boolean exemptAdminKick;
-    private List<String> punishmentCommands;
-    private List<String> attackerRewardCommands;
+    private volatile boolean combatLogoutEnabled;
+    private volatile boolean combatLogoutKillPlayer;
+    private volatile boolean combatLogoutRewardAttacker;
+    private volatile boolean exemptAdminKick;
+    private volatile List<String> punishmentCommands = Collections.emptyList();
+    private volatile List<String> attackerRewardCommands = Collections.emptyList();
+
+    // Cached command blocking rules (avoid config lookups + list scans per command)
+    private volatile String commandBlockMode = "whitelist";
+    private volatile Set<String> blockedCommands = Collections.emptySet();
+    private volatile List<String> blockedCommandWildcards = Collections.emptyList();
+    private volatile Set<String> allowedCommands = Collections.emptySet();
+    private volatile List<String> allowedCommandWildcards = Collections.emptyList();
 
     public CombatListeners(CelestCombatPro plugin) {
         this.plugin = plugin;
@@ -63,23 +77,75 @@ public class CombatListeners implements Listener {
         this.combatLogoutKillPlayer  = plugin.getConfig().getBoolean("combat.combat_logout.kill_player", true);
         this.combatLogoutRewardAttacker = plugin.getConfig().getBoolean("combat.combat_logout.reward_attacker", true);
         this.exemptAdminKick         = plugin.getConfig().getBoolean("combat.exempt_admin_kick", true);
-        this.punishmentCommands      = plugin.getConfig().getStringList("combat.combat_logout.punishment_commands");
-        this.attackerRewardCommands  = plugin.getConfig().getStringList("combat.combat_logout.attacker_reward_commands");
+        this.punishmentCommands      = List.copyOf(plugin.getConfig().getStringList("combat.combat_logout.punishment_commands"));
+        this.attackerRewardCommands  = List.copyOf(plugin.getConfig().getStringList("combat.combat_logout.attacker_reward_commands"));
+
+        this.commandBlockMode = plugin.getConfig().getString("combat.command_block_mode", "whitelist").toLowerCase(Locale.ROOT);
+        this.blockedCommands = compileExact(plugin.getConfig().getStringList("combat.blocked_commands"));
+        this.blockedCommandWildcards = compileWildcards(plugin.getConfig().getStringList("combat.blocked_commands"));
+        this.allowedCommands = compileExact(plugin.getConfig().getStringList("combat.allowed_commands"));
+        this.allowedCommandWildcards = compileWildcards(plugin.getConfig().getStringList("combat.allowed_commands"));
+    }
+
+    private static Set<String> compileExact(List<String> configured) {
+        if (configured == null || configured.isEmpty()) {
+            return Collections.emptySet();
+        }
+        Set<String> result = new HashSet<>(configured.size());
+        for (String raw : configured) {
+            if (raw == null) continue;
+            String value = raw.trim().toLowerCase(Locale.ROOT);
+            if (!value.isEmpty() && !value.endsWith("*")) {
+                result.add(value);
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    private static List<String> compileWildcards(List<String> configured) {
+        if (configured == null || configured.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<String> result = new ArrayList<>(configured.size());
+        for (String raw : configured) {
+            if (raw == null) continue;
+            String value = raw.trim().toLowerCase(Locale.ROOT);
+            if (value.endsWith("*")) {
+                value = value.substring(0, value.length() - 1);
+                if (!value.isEmpty()) {
+                    result.add(value);
+                }
+            }
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    private static boolean matchesRules(String command, Set<String> exact, List<String> wildcards) {
+        if (exact.contains(command)) {
+            return true;
+        }
+        for (int i = 0; i < wildcards.size(); i++) {
+            if (command.startsWith(wildcards.get(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onEntityDamage(EntityDamageEvent event) {
-        if (!(event.getEntity() instanceof Player)) return;
-        Player player = (Player) event.getEntity();
+        if (!(event.getEntity() instanceof Player player)) return;
 
         // Only block explosion-style damage types inside safe zones
         EntityDamageEvent.DamageCause cause = event.getCause();
         if (cause == EntityDamageEvent.DamageCause.BLOCK_EXPLOSION
                 || cause == EntityDamageEvent.DamageCause.ENTITY_EXPLOSION) {
-            if (CelestCombatPro.getInstance().getWorldGuardHook() != null
-                    && CelestCombatPro.getInstance().getWorldGuardHook().isLocationInSafeZone(player.getLocation())) {
+            if (plugin.getWorldGuardHook() != null
+                    && plugin.getWorldGuardHook().isLocationInSafeZone(player.getLocation())) {
                 event.setCancelled(true);
-                plugin.debug("Cancelled explosion damage in safe zone for: " + player.getName());
+                if (plugin.isDebugMode()) {
+                    plugin.debug("Cancelled explosion damage in safe zone for: " + player.getName());
+                }
             }
         }
     }
@@ -96,13 +162,12 @@ public class CombatListeners implements Listener {
         plugin.debug("CombatListeners managers reloaded successfully");
     }
 
-    // NOTE: This method is now registered dynamically with configurable priority
+    // NOTE: This method is registered dynamically with configurable priority
     public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
-        if (!(event.getEntity() instanceof Player)) {
+        if (!(event.getEntity() instanceof Player victim)) {
             return;
         }
 
-        Player victim = (Player) event.getEntity();
         Player attacker = null;
         Entity damager = event.getDamager();
 
@@ -124,7 +189,9 @@ public class CombatListeners implements Listener {
                 // Handle the protection (sends messages and potentially removes protection)
                 if (newbieProtectionManager.handleDamageReceived(victim, attacker)) {
                     event.setCancelled(true);
-                    plugin.debug("Blocked PvP damage to protected newbie: " + victim.getName());
+                    if (plugin.isDebugMode()) {
+                        plugin.debug("Blocked PvP damage to protected newbie: " + victim.getName());
+                    }
                     return;
                 }
             }
@@ -142,13 +209,16 @@ public class CombatListeners implements Listener {
                 lastDamageTime.put(victimId, System.currentTimeMillis());
 
                 // Determine combat cause
-                PreCombatEvent.CombatCause cause = damager instanceof Projectile 
-                    ? PreCombatEvent.CombatCause.PROJECTILE 
+                PreCombatEvent.CombatCause cause = damager instanceof Projectile
+                    ? PreCombatEvent.CombatCause.PROJECTILE
                     : PreCombatEvent.CombatCause.PLAYER_ATTACK;
 
                 // Combat tag both players using API
-                CelestCombatAPI.getCombatAPI().tagPlayer(attacker, victim, cause);
-                CelestCombatAPI.getCombatAPI().tagPlayer(victim, attacker, cause);
+                CombatAPI api = CelestCombatAPI.getCombatAPI();
+                if (api != null) {
+                    api.tagPlayer(attacker, victim, cause);
+                    api.tagPlayer(victim, attacker, cause);
+                }
 
                 // Perform cleanup of stale records periodically
                 if (lastDamageTime.size() > 100) {
@@ -160,7 +230,9 @@ public class CombatListeners implements Listener {
             if (newbieProtectionManager.shouldProtectFromMobs() &&
                     newbieProtectionManager.hasProtection(victim)) {
                 event.setCancelled(true);
-                plugin.debug("Blocked mob damage to protected newbie: " + victim.getName());
+                if (plugin.isDebugMode()) {
+                    plugin.debug("Blocked mob damage to protected newbie: " + victim.getName());
+                }
             }
         }
     }
@@ -177,52 +249,76 @@ public class CombatListeners implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
+        UUID playerUUID = player.getUniqueId();
 
         // Handle newbie protection cleanup
         newbieProtectionManager.handlePlayerQuit(player);
 
-        if (CelestCombatAPI.getCombatAPI().isInCombat(player)) {
-            playerLoggedOutInCombat.put(player.getUniqueId(), true);
+        CombatAPI api = CelestCombatAPI.getCombatAPI();
+        if (api == null) {
+            return;
+        }
 
-            if (combatLogoutEnabled) {
-                Player opponent = CelestCombatAPI.getCombatAPI().getCombatOpponent(player);
+        // Cooldowns do not survive a disconnect (matches previous timer cleanup behavior)
+        plugin.getCombatManager().clearTransientCooldowns(playerUUID);
 
-                if (combatLogoutKillPlayer) {
-                    CelestCombatAPI.getCombatAPI().punishCombatLogout(player);
+        if (!api.isInCombat(player)) {
+            playerLoggedOutInCombat.put(playerUUID, false);
+            return;
+        }
+
+        playerLoggedOutInCombat.put(playerUUID, true);
+
+        if (!combatLogoutEnabled) {
+            api.punishCombatLogout(player);
+            return;
+        }
+
+        Player opponent = api.getCombatOpponent(player);
+        String playerName = player.getName();
+
+        // Queue punishment commands before the kill: killing fires PlayerDeathEvent
+        // synchronously, which may already enqueue kill-reward commands.
+        if (!punishmentCommands.isEmpty()) {
+            String attackerName = opponent != null ? opponent.getName() : "Unknown";
+            List<String> processed = new ArrayList<>(punishmentCommands.size());
+            for (String cmd : punishmentCommands) {
+                if (cmd == null || cmd.isBlank()) continue;
+                processed.add(cmd
+                        .replace("%player%", playerName)
+                        .replace("%attacker%", attackerName));
+            }
+            Scheduler.dispatchCommands(plugin.getServer().getConsoleSender(), processed);
+        }
+
+        // kill_player still runs on the quitting player's own region thread
+        if (combatLogoutKillPlayer) {
+            api.punishCombatLogout(player);
+        }
+
+        if (combatLogoutRewardAttacker && opponent != null && opponent.isOnline()) {
+            killRewardManager.giveKillReward(opponent, player);
+
+            if (!attackerRewardCommands.isEmpty()) {
+                List<String> processed = new ArrayList<>(attackerRewardCommands.size());
+                for (String cmd : attackerRewardCommands) {
+                    if (cmd == null || cmd.isBlank()) continue;
+                    processed.add(cmd
+                            .replace("%player%", opponent.getName())
+                            .replace("%victim%", playerName));
                 }
-
-                for (String cmd : punishmentCommands) {
-                    String finalCmd = cmd
-                            .replace("%player%", player.getName())
-                            .replace("%attacker%", opponent != null ? opponent.getName() : "Unknown");
-                    plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), finalCmd);
-                }
-
-                if (combatLogoutRewardAttacker && opponent != null && opponent.isOnline()) {
-                    killRewardManager.giveKillReward(opponent, player);
-
-                    for (String cmd : attackerRewardCommands) {
-                        String finalCmd = cmd
-                                .replace("%player%", opponent.getName())
-                                .replace("%victim%", player.getName());
-                        plugin.getServer().dispatchCommand(plugin.getServer().getConsoleSender(), finalCmd);
-                    }
-
-                    Map<String, String> placeholders = new HashMap<>();
-                    placeholders.put("victim", player.getName());
-                    messageManager.sendMessage(opponent, "combat_logout_attacker_reward", placeholders);
-
-                    deathAnimationManager.performDeathAnimation(player, opponent);
-                    CelestCombatAPI.getCombatAPI().removeFromCombatSilently(opponent);
-                } else if (opponent == null) {
-                    deathAnimationManager.performDeathAnimation(player, null);
-                }
-            } else {
-                CelestCombatAPI.getCombatAPI().punishCombatLogout(player);
+                Scheduler.dispatchCommands(plugin.getServer().getConsoleSender(), processed);
             }
 
-        } else {
-            playerLoggedOutInCombat.put(player.getUniqueId(), false);
+            Map<String, String> placeholders = new HashMap<>();
+            placeholders.put("victim", playerName);
+            Scheduler.runEntity(opponent,
+                    () -> messageManager.sendMessage(opponent, "combat_logout_attacker_reward", placeholders));
+
+            deathAnimationManager.performDeathAnimation(player, opponent);
+            api.removeFromCombatSilently(opponent);
+        } else if (opponent == null) {
+            deathAnimationManager.performDeathAnimation(player, null);
         }
     }
 
@@ -234,26 +330,31 @@ public class CombatListeners implements Listener {
         // Handle newbie protection cleanup
         newbieProtectionManager.handlePlayerQuit(player);
 
-        if (CelestCombatAPI.getCombatAPI().isInCombat(player)) {
+        CombatAPI api = CelestCombatAPI.getCombatAPI();
+        if (api == null) {
+            return;
+        }
+
+        if (api.isInCombat(player)) {
             if (exemptAdminKick) {
-                Player opponent = CelestCombatAPI.getCombatAPI().getCombatOpponent(player);
-                CelestCombatAPI.getCombatAPI().removeFromCombatSilently(player);
+                Player opponent = api.getCombatOpponent(player);
+                api.removeFromCombatSilently(player);
                 if (opponent != null) {
-                    CelestCombatAPI.getCombatAPI().removeFromCombat(opponent);
+                    api.removeFromCombat(opponent);
                 }
             } else {
-                Player opponent = CelestCombatAPI.getCombatAPI().getCombatOpponent(player);
+                Player opponent = api.getCombatOpponent(player);
                 playerLoggedOutInCombat.put(player.getUniqueId(), true);
-                CelestCombatAPI.getCombatAPI().punishCombatLogout(player);
+                api.punishCombatLogout(player);
                 if (opponent != null && opponent.isOnline()) {
                     killRewardManager.giveKillReward(opponent, player);
                     deathAnimationManager.performDeathAnimation(player, opponent);
                 } else {
                     deathAnimationManager.performDeathAnimation(player, null);
                 }
-                CelestCombatAPI.getCombatAPI().removeFromCombatSilently(player);
+                api.removeFromCombatSilently(player);
                 if (opponent != null) {
-                    CelestCombatAPI.getCombatAPI().removeFromCombat(opponent);
+                    api.removeFromCombat(opponent);
                 }
             }
         }
@@ -268,8 +369,12 @@ public class CombatListeners implements Listener {
         // Remove newbie protection on death (if they had it)
         if (newbieProtectionManager.hasProtection(victim)) {
             newbieProtectionManager.removeProtection(victim, false);
-            plugin.debug("Removed newbie protection from " + victim.getName() + " due to death");
+            if (plugin.isDebugMode()) {
+                plugin.debug("Removed newbie protection from " + victim.getName() + " due to death");
+            }
         }
+
+        CombatAPI api = CelestCombatAPI.getCombatAPI();
 
         // If player directly killed by another player
         if (killer != null && !killer.equals(victim)) {
@@ -279,13 +384,15 @@ public class CombatListeners implements Listener {
             // Perform death animation
             deathAnimationManager.performDeathAnimation(victim, killer);
 
-            // Remove from combat - killer's combat timer is removed on kill
-            CelestCombatAPI.getCombatAPI().removeFromCombatSilently(victim);
-            CelestCombatAPI.getCombatAPI().removeFromCombatSilently(killer);
+            if (api != null) {
+                // Remove from combat - killer's combat timer is removed on kill
+                api.removeFromCombatSilently(victim);
+                api.removeFromCombatSilently(killer);
+            }
         }
         // If player died by other causes but was in combat
-        else if (CelestCombatAPI.getCombatAPI().isInCombat(victim)) {
-            Player opponent = CelestCombatAPI.getCombatAPI().getCombatOpponent(victim);
+        else if (api != null && api.isInCombat(victim)) {
+            Player opponent = api.getCombatOpponent(victim);
 
             // Check if we have an opponent or a recent damage source
             Player actualKiller = null;
@@ -313,11 +420,11 @@ public class CombatListeners implements Listener {
             }
 
             // Clean up combat state - remove killer's combat timer on kill
-            CelestCombatAPI.getCombatAPI().removeFromCombatSilently(victim);
+            api.removeFromCombatSilently(victim);
             if (actualKiller != null) {
-                CelestCombatAPI.getCombatAPI().removeFromCombatSilently(actualKiller);
+                api.removeFromCombatSilently(actualKiller);
             } else if (opponent != null) {
-                CelestCombatAPI.getCombatAPI().removeFromCombatSilently(opponent);
+                api.removeFromCombatSilently(opponent);
             }
 
             // Clean up damage tracking
@@ -342,7 +449,7 @@ public class CombatListeners implements Listener {
         newbieProtectionManager.handlePlayerJoin(player);
 
         if (playerLoggedOutInCombat.containsKey(playerUUID)) {
-            if (playerLoggedOutInCombat.get(playerUUID)) {
+            if (Boolean.TRUE.equals(playerLoggedOutInCombat.get(playerUUID))) {
                 Map<String, String> placeholders = new HashMap<>();
                 placeholders.put("player", player.getName());
                 messageManager.sendMessage(player, "player_died_combat_logout", placeholders);
@@ -359,70 +466,53 @@ public class CombatListeners implements Listener {
     // Use LOW priority to ensure command blocking happens BEFORE other plugins (like EssentialsX GUI)
     // process the command. This prevents plugins that don't respect cancelled events from bypassing
     // the command restrictions during combat.
-    // NOTE: This method is now registered dynamically with configurable priority
+    // NOTE: This method is registered dynamically with configurable priority
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
         Player player = event.getPlayer();
 
-        if (CelestCombatAPI.getCombatAPI().isInCombat(player)) {
-            String fullCommand = event.getMessage().substring(1); // Remove leading "/"
-            String command = fullCommand.split(" ")[0].toLowerCase();
+        CombatAPI api = CelestCombatAPI.getCombatAPI();
+        if (api == null || !api.isInCombat(player)) {
+            return;
+        }
 
-            // Get command blocking mode from config
-            String blockMode = plugin.getConfig().getString("combat.command_block_mode", "whitelist").toLowerCase();
+        String fullCommand = event.getMessage().substring(1); // Remove leading "/"
+        String command = fullCommand.split(" ", 2)[0].toLowerCase(Locale.ROOT);
 
-            // Determine if the command should be blocked based on the mode
-            boolean shouldBlock = false;
+        // Determine if the command should be blocked based on the cached mode/rules
+        boolean shouldBlock;
+        if ("blacklist".equals(commandBlockMode)) {
+            shouldBlock = matchesRules(command, blockedCommands, blockedCommandWildcards);
+        } else {
+            // Whitelist mode - allow only commands in the list
+            shouldBlock = !matchesRules(command, allowedCommands, allowedCommandWildcards);
+        }
 
-            if ("blacklist".equalsIgnoreCase(blockMode)) {
-                // Blacklist mode - block commands in the list
-                List<String> blockedCommands = plugin.getConfig().getStringList("combat.blocked_commands");
+        // Block the command if necessary
+        if (shouldBlock) {
+            event.setCancelled(true);
 
-                for (String blockedCmd : blockedCommands) {
-                    String blockedCmdLower = blockedCmd.toLowerCase();
-                    if (command.equalsIgnoreCase(blockedCmdLower) ||
-                            (blockedCmdLower.endsWith("*") && command.startsWith(blockedCmdLower.substring(0, blockedCmdLower.length() - 1)))) {
-                        shouldBlock = true;
-                        break;
-                    }
-                }
-            } else {
-                // Whitelist mode - allow only commands in the list
-                List<String> allowedCommands = plugin.getConfig().getStringList("combat.allowed_commands");
-                shouldBlock = true; // Block by default
-
-                for (String allowedCmd : allowedCommands) {
-                    String allowedCmdLower = allowedCmd.toLowerCase();
-                    if (command.equalsIgnoreCase(allowedCmdLower) ||
-                            (allowedCmdLower.endsWith("*") && command.startsWith(allowedCmdLower.substring(0, allowedCmdLower.length() - 1)))) {
-                        shouldBlock = false; // Command is allowed
-                        break;
-                    }
-                }
-            }
-
-            // Block the command if necessary
-            if (shouldBlock) {
-                event.setCancelled(true);
-
-                Map<String, String> placeholders = new HashMap<>();
-                placeholders.put("player", player.getName());
-                placeholders.put("command", command);
-                placeholders.put("time", String.valueOf(CelestCombatAPI.getCombatAPI().getRemainingCombatTime(player)));
-                messageManager.sendMessage(player, "command_blocked_in_combat", placeholders);
-            }
+            Map<String, String> placeholders = new HashMap<>();
+            placeholders.put("player", player.getName());
+            placeholders.put("command", command);
+            placeholders.put("time", String.valueOf(api.getRemainingCombatTime(player)));
+            messageManager.sendMessage(player, "command_blocked_in_combat", placeholders);
         }
     }
 
-    // NOTE: This method is now registered dynamically with configurable priority
+    // NOTE: This method is registered dynamically with configurable priority
     public void onPlayerToggleFlight(PlayerToggleFlightEvent event) {
         Player player = event.getPlayer();
 
         // If player is trying to enable flight
-        if (event.isFlying() && CelestCombatAPI.getCombatAPI().shouldDisableFlight(player)) {
+        if (event.isFlying() && CelestCombatAPI.getCombatAPI() != null
+                && CelestCombatAPI.getCombatAPI().shouldDisableFlight(player)) {
             // Only cancel if player is actually trying to fly (not just falling/knockback)
             // Check if player is on ground or has significant upward velocity (intentional flight)
             if (player.isOnGround() || player.getVelocity().getY() > 0) {
                 event.setCancelled(true);
+                Map<String, String> placeholders = new HashMap<>();
+                placeholders.put("player", player.getName());
+                messageManager.sendMessage(player, "combat_fly_disabled", placeholders);
             }
         }
     }

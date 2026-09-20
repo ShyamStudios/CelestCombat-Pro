@@ -2,520 +2,457 @@ package com.shyamstudio.celestCombatPro;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import java.util.concurrent.CompletableFuture;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 import java.util.logging.Level;
 
 /**
- * Universal scheduler utility that supports both traditional Bukkit scheduling
- * and Folia's region-based scheduling system.
+ * Central scheduling layer for CelestCombat-Pro.
  *
- * This class automatically detects which server implementation is being used
- * and provides appropriate scheduling methods.
+ * <p>Every scheduler call in the plugin must go through this class so that the correct
+ * execution context is chosen for both traditional Paper/Leaf servers and Folia/Canvas
+ * region-threaded servers:
+ *
+ * <ul>
+ *     <li>{@link #runGlobal(Runnable)} — global state, console command dispatch, plugin-wide tasks</li>
+ *     <li>{@link #runRegion(Location, Runnable)} — world/region bound work (particles, block changes)</li>
+ *     <li>{@link #runEntity(Entity, Runnable)} — entity/player bound work (inventory, velocity, messages)</li>
+ *     <li>{@link #runAsync(Runnable)} — pure computation and file/network I/O that never touches Bukkit state</li>
+ * </ul>
  */
 public final class Scheduler {
 
-    private static final Plugin plugin;
-    private static final boolean isFolia;
+    private static final String PLUGIN_NAME = "CelestCombat-Pro";
 
-    static {
-        plugin = CelestCombatPro.getInstance();
+    private static final boolean FOLIA = detectFolia();
 
-        // Check if we're running on Folia
-        boolean foliaDetected = false;
+    private static volatile Plugin plugin;
+
+    private Scheduler() {
+    }
+
+    /**
+     * Binds the scheduler to the running plugin instance. Called from {@code onEnable()}.
+     */
+    public static void init(Plugin pluginInstance) {
+        plugin = pluginInstance;
+    }
+
+    public static boolean isFolia() {
+        return FOLIA;
+    }
+
+    private static boolean detectFolia() {
         try {
             Class.forName("io.papermc.paper.threadedregions.RegionizedServer");
-            foliaDetected = true;
-            plugin.getLogger().info("Folia detected! Using region-based threading system.");
-        } catch (final ClassNotFoundException e) {
-            plugin.getLogger().info("Running on standard Paper server.");
+            return true;
+        } catch (ClassNotFoundException | LinkageError e) {
+            return false;
         }
-        isFolia = foliaDetected;
     }
 
-    /**
-     * Runs a task on the main thread (or global region in Folia).
-     *
-     * @param runnable The task to run
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runTask(Runnable runnable) {
-        if (isFolia) {
+    private static Plugin plugin() {
+        Plugin current = plugin;
+        if (current != null) {
+            return current;
+        }
+        current = Bukkit.getPluginManager().getPlugin(PLUGIN_NAME);
+        if (current != null) {
+            plugin = current;
+        }
+        return current;
+    }
+
+    private static boolean hasPlugin() {
+        Plugin current = plugin();
+        if (current == null || !current.isEnabled()) {
+            plugin = null;
+            return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Global (main thread / global region)
+    // ------------------------------------------------------------------
+
+    public static Task runGlobal(Runnable runnable) {
+        if (!hasPlugin()) {
+            logUnavailable("global");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getGlobalRegionScheduler().run(plugin, scheduledTask -> runnable.run());
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Error scheduling task in Folia", e);
-                return new Task(null);
+                return new Task(Bukkit.getGlobalRegionScheduler().run(plugin(), task -> runnable.run()));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.SEVERE, "Failed to schedule global task on Folia", t);
+                return Task.EMPTY;
             }
-        } else {
-            return new Task(Bukkit.getScheduler().runTask(plugin, runnable));
         }
+        return new Task(Bukkit.getScheduler().runTask(plugin(), runnable));
     }
 
-    /**
-     * Runs a task asynchronously.
-     *
-     * @param runnable The task to run
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runTaskAsync(Runnable runnable) {
-        if (isFolia) {
+    public static Task runGlobalLater(Runnable runnable, long delayTicks) {
+        if (!hasPlugin()) {
+            logUnavailable("delayed global");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getAsyncScheduler().runNow(plugin, scheduledTask -> runnable.run());
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Error scheduling async task in Folia", e);
-                return new Task(null);
+                return new Task(Bukkit.getGlobalRegionScheduler().runDelayed(plugin(),
+                        task -> runnable.run(), Math.max(1L, delayTicks)));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.SEVERE, "Failed to schedule delayed global task on Folia", t);
+                return Task.EMPTY;
             }
-        } else {
-            return new Task(Bukkit.getScheduler().runTaskAsynchronously(plugin, runnable));
         }
+        return new Task(Bukkit.getScheduler().runTaskLater(plugin(), runnable, delayTicks));
     }
 
-    /**
-     * Runs a task after a specified delay.
-     *
-     * @param runnable   The task to run
-     * @param delayTicks The delay in ticks before running the task
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runTaskLater(Runnable runnable, long delayTicks) {
-        if (isFolia) {
+    public static Task runGlobalTimer(Runnable runnable, long delayTicks, long periodTicks) {
+        if (!hasPlugin()) {
+            logUnavailable("repeating global");
+            return Task.EMPTY;
+        }
+        long period = Math.max(1L, periodTicks);
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getGlobalRegionScheduler().runDelayed(plugin, scheduledTask -> runnable.run(),
-                                delayTicks < 1 ? 1 : delayTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Error scheduling delayed task in Folia", e);
-                return new Task(null);
+                return new Task(Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin(),
+                        task -> runnable.run(), Math.max(1L, delayTicks), period));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.SEVERE, "Failed to schedule repeating global task on Folia", t);
+                return Task.EMPTY;
             }
-        } else {
-            return new Task(Bukkit.getScheduler().runTaskLater(plugin, runnable, delayTicks));
         }
+        return new Task(Bukkit.getScheduler().runTaskTimer(plugin(), runnable, delayTicks, period));
     }
 
-    /**
-     * Runs a task asynchronously after a specified delay.
-     *
-     * @param runnable   The task to run
-     * @param delayTicks The delay in ticks before running the task
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runTaskLaterAsync(Runnable runnable, long delayTicks) {
-        if (isFolia) {
+    // ------------------------------------------------------------------
+    // Async
+    // ------------------------------------------------------------------
+
+    public static Task runAsync(Runnable runnable) {
+        if (!hasPlugin()) {
+            logUnavailable("async");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                long delayMs = delayTicks * 50; // Convert ticks to milliseconds
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getAsyncScheduler().runDelayed(plugin, scheduledTask -> runnable.run(),
-                                delayMs, TimeUnit.MILLISECONDS);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Error scheduling delayed async task in Folia", e);
-                return new Task(null);
+                return new Task(Bukkit.getAsyncScheduler().runNow(plugin(), task -> runnable.run()));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.SEVERE, "Failed to schedule async task on Folia", t);
+                return Task.EMPTY;
             }
-        } else {
-            return new Task(Bukkit.getScheduler().runTaskLaterAsynchronously(plugin, runnable, delayTicks));
         }
+        return new Task(Bukkit.getScheduler().runTaskAsynchronously(plugin(), runnable));
     }
 
-    /**
-     * Runs a task repeatedly at fixed intervals.
-     *
-     * @param runnable    The task to run
-     * @param delayTicks  The initial delay in ticks before the first execution
-     * @param periodTicks The period in ticks between subsequent executions
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runTaskTimer(Runnable runnable, long delayTicks, long periodTicks) {
-        if (isFolia) {
+    public static Task runAsyncLater(Runnable runnable, long delayTicks) {
+        if (!hasPlugin()) {
+            logUnavailable("delayed async");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, scheduledTask -> runnable.run(),
-                                delayTicks < 1 ? 1 : delayTicks, periodTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Error scheduling timer task in Folia", e);
-                return new Task(null);
+                long delayMs = Math.max(50L, delayTicks * 50L);
+                return new Task(Bukkit.getAsyncScheduler().runDelayed(plugin(),
+                        task -> runnable.run(), delayMs, TimeUnit.MILLISECONDS));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.SEVERE, "Failed to schedule delayed async task on Folia", t);
+                return Task.EMPTY;
             }
-        } else {
-            return new Task(Bukkit.getScheduler().runTaskTimer(plugin, runnable, delayTicks, periodTicks));
         }
+        return new Task(Bukkit.getScheduler().runTaskLaterAsynchronously(plugin(), runnable, delayTicks));
     }
 
-    /**
-     * Runs a task repeatedly at fixed intervals asynchronously.
-     *
-     * @param runnable    The task to run
-     * @param delayTicks  The initial delay in ticks before the first execution
-     * @param periodTicks The period in ticks between subsequent executions
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runTaskTimerAsync(Runnable runnable, long delayTicks, long periodTicks) {
-        if (isFolia) {
+    public static Task runAsyncTimer(Runnable runnable, long delayTicks, long periodTicks) {
+        if (!hasPlugin()) {
+            logUnavailable("repeating async");
+            return Task.EMPTY;
+        }
+        long period = Math.max(1L, periodTicks);
+        if (FOLIA) {
             try {
-                // Convert ticks to milliseconds (1 tick = 50ms)
-                long delayMs = delayTicks * 50;
-                long periodMs = periodTicks * 50;
-
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getAsyncScheduler().runAtFixedRate(plugin, scheduledTask -> runnable.run(),
-                                delayMs, periodMs, TimeUnit.MILLISECONDS);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.SEVERE, "Error scheduling timer async task in Folia", e);
-                return new Task(null);
+                long delayMs = Math.max(50L, delayTicks * 50L);
+                long periodMs = Math.max(50L, period * 50L);
+                return new Task(Bukkit.getAsyncScheduler().runAtFixedRate(plugin(),
+                        task -> runnable.run(), delayMs, periodMs, TimeUnit.MILLISECONDS));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.SEVERE, "Failed to schedule repeating async task on Folia", t);
+                return Task.EMPTY;
             }
-        } else {
-            return new Task(Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, runnable, delayTicks, periodTicks));
         }
+        return new Task(Bukkit.getScheduler().runTaskTimerAsynchronously(plugin(), runnable, delayTicks, period));
     }
 
+    // ------------------------------------------------------------------
+    // Entity (player, projectile, mob) bound
+    // ------------------------------------------------------------------
+
     /**
-     * Runs a task in the region of a specific entity.
-     * Falls back to regular scheduling on non-Folia servers.
-     *
-     * @param entity   The entity in whose region to run the task
-     * @param runnable The task to run
-     * @return A Task object representing the scheduled task
+     * Runs a task on the thread owning {@code entity}. If the entity is already retired the
+     * task is dropped — entity state must never be touched after retirement anyway.
      */
-    public static Task runEntityTask(Entity entity, Runnable runnable) {
-        if (isFolia && entity != null) {
+    public static Task runEntity(Entity entity, Runnable runnable) {
+        if (entity == null) {
+            return Task.EMPTY;
+        }
+        if (!hasPlugin()) {
+            logUnavailable("entity");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        entity.getScheduler().run(plugin, scheduledTask -> runnable.run(), null);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling entity task in Folia, falling back to global scheduler", e);
-                return runTask(runnable);
+                return new Task(entity.getScheduler().run(plugin(), task -> runnable.run(), null));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.WARNING,
+                        "Failed to schedule entity task, skipping to avoid thread violation", t);
+                return Task.EMPTY;
             }
-        } else {
-            return runTask(runnable);
         }
+        return new Task(Bukkit.getScheduler().runTask(plugin(), runnable));
     }
 
-    /**
-     * Runs a delayed task in the region of a specific entity.
-     *
-     * @param entity     The entity in whose region to run the task
-     * @param runnable   The task to run
-     * @param delayTicks The delay in ticks before running the task
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runEntityTaskLater(Entity entity, Runnable runnable, long delayTicks) {
-        if (isFolia && entity != null) {
+    public static Task runEntityLater(Entity entity, Runnable runnable, long delayTicks) {
+        if (entity == null) {
+            return Task.EMPTY;
+        }
+        if (!hasPlugin()) {
+            logUnavailable("delayed entity");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        entity.getScheduler().runDelayed(plugin, scheduledTask -> runnable.run(), null,
-                                delayTicks < 1 ? 1 : delayTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling delayed entity task in Folia, falling back to global scheduler", e);
-                return runTaskLater(runnable, delayTicks);
+                return new Task(entity.getScheduler().runDelayed(plugin(), task -> runnable.run(), null,
+                        Math.max(1L, delayTicks)));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.WARNING,
+                        "Failed to schedule delayed entity task, skipping to avoid thread violation", t);
+                return Task.EMPTY;
             }
-        } else {
-            return runTaskLater(runnable, delayTicks);
         }
+        return new Task(Bukkit.getScheduler().runTaskLater(plugin(), runnable, delayTicks));
     }
 
-    /**
-     * Runs a repeated task in the region of a specific entity.
-     *
-     * @param entity     The entity in whose region to run the task
-     * @param runnable   The task to run
-     * @param delayTicks The initial delay in ticks before the first execution
-     * @param periodTicks The period in ticks between subsequent executions
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runEntityTaskTimer(Entity entity, Runnable runnable, long delayTicks, long periodTicks) {
-        if (isFolia && entity != null) {
+    public static Task runEntityTimer(Entity entity, Runnable runnable, long delayTicks, long periodTicks) {
+        if (entity == null) {
+            return Task.EMPTY;
+        }
+        if (!hasPlugin()) {
+            logUnavailable("repeating entity");
+            return Task.EMPTY;
+        }
+        long period = Math.max(1L, periodTicks);
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        entity.getScheduler().runAtFixedRate(plugin, scheduledTask -> runnable.run(), null,
-                                delayTicks < 1 ? 1 : delayTicks, periodTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling timer entity task in Folia, falling back to global scheduler", e);
-                return runTaskTimer(runnable, delayTicks, periodTicks);
+                return new Task(entity.getScheduler().runAtFixedRate(plugin(), task -> runnable.run(), null,
+                        Math.max(1L, delayTicks), period));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.WARNING,
+                        "Failed to schedule repeating entity task, skipping to avoid thread violation", t);
+                return Task.EMPTY;
             }
-        } else {
-            return runTaskTimer(runnable, delayTicks, periodTicks);
         }
+        return new Task(Bukkit.getScheduler().runTaskTimer(plugin(), runnable, delayTicks, period));
     }
 
-    /**
-     * Runs a task in the region of a specific location.
-     * Falls back to regular scheduling on non-Folia servers.
-     *
-     * @param location The location in whose region to run the task
-     * @param runnable The task to run
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runLocationTask(Location location, Runnable runnable) {
-        if (isFolia && location != null && location.getWorld() != null) {
+    // ------------------------------------------------------------------
+    // Region (world) bound
+    // ------------------------------------------------------------------
+
+    public static Task runRegion(Location location, Runnable runnable) {
+        if (location == null || location.getWorld() == null) {
+            return Task.EMPTY;
+        }
+        if (!hasPlugin()) {
+            logUnavailable("region");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getRegionScheduler().run(plugin, location, scheduledTask -> runnable.run());
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling location task in Folia, falling back to global scheduler", e);
-                return runTask(runnable);
+                return new Task(Bukkit.getRegionScheduler().run(plugin(), location, task -> runnable.run()));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.WARNING,
+                        "Failed to schedule region task for world "
+                                + location.getWorld().getName() + " (unloaded?), task skipped", t);
+                return Task.EMPTY;
             }
-        } else {
-            return runTask(runnable);
         }
+        return new Task(Bukkit.getScheduler().runTask(plugin(), runnable));
     }
 
-    /**
-     * Runs a delayed task in the region of a specific location.
-     *
-     * @param location   The location in whose region to run the task
-     * @param runnable   The task to run
-     * @param delayTicks The delay in ticks before running the task
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runLocationTaskLater(Location location, Runnable runnable, long delayTicks) {
-        if (isFolia && location != null && location.getWorld() != null) {
+    public static Task runRegionLater(Location location, Runnable runnable, long delayTicks) {
+        if (location == null || location.getWorld() == null) {
+            return Task.EMPTY;
+        }
+        if (!hasPlugin()) {
+            logUnavailable("delayed region");
+            return Task.EMPTY;
+        }
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getRegionScheduler().runDelayed(plugin, location, scheduledTask -> runnable.run(),
-                                delayTicks < 1 ? 1 : delayTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling delayed location task in Folia, falling back to global scheduler", e);
-                return runTaskLater(runnable, delayTicks);
+                return new Task(Bukkit.getRegionScheduler().runDelayed(plugin(), location,
+                        task -> runnable.run(), Math.max(1L, delayTicks)));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.WARNING,
+                        "Failed to schedule delayed region task for world "
+                                + location.getWorld().getName() + " (unloaded?), task skipped", t);
+                return Task.EMPTY;
             }
-        } else {
-            return runTaskLater(runnable, delayTicks);
         }
+        return new Task(Bukkit.getScheduler().runTaskLater(plugin(), runnable, delayTicks));
     }
 
-    /**
-     * Runs a repeated task in the region of a specific location.
-     *
-     * @param location   The location in whose region to run the task
-     * @param runnable   The task to run
-     * @param delayTicks The initial delay in ticks before the first execution
-     * @param periodTicks The period in ticks between subsequent executions
-     * @return A Task object representing the scheduled task
-     */
-    public static Task runLocationTaskTimer(Location location, Runnable runnable, long delayTicks, long periodTicks) {
-        if (isFolia && location != null && location.getWorld() != null) {
+    public static Task runRegionTimer(Location location, Runnable runnable, long delayTicks, long periodTicks) {
+        if (location == null || location.getWorld() == null) {
+            return Task.EMPTY;
+        }
+        if (!hasPlugin()) {
+            logUnavailable("repeating region");
+            return Task.EMPTY;
+        }
+        long period = Math.max(1L, periodTicks);
+        if (FOLIA) {
             try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getRegionScheduler().runAtFixedRate(plugin, location, scheduledTask -> runnable.run(),
-                                delayTicks < 1 ? 1 : delayTicks, periodTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling timer location task in Folia, falling back to global scheduler", e);
-                return runTaskTimer(runnable, delayTicks, periodTicks);
+                return new Task(Bukkit.getRegionScheduler().runAtFixedRate(plugin(), location,
+                        task -> runnable.run(), Math.max(1L, delayTicks), period));
+            } catch (Throwable t) {
+                plugin().getLogger().log(Level.WARNING,
+                        "Failed to schedule repeating region task for world "
+                                + location.getWorld().getName() + " (unloaded?), task skipped", t);
+                return Task.EMPTY;
             }
-        } else {
-            return runTaskTimer(runnable, delayTicks, periodTicks);
         }
+        return new Task(Bukkit.getScheduler().runTaskTimer(plugin(), runnable, delayTicks, period));
+    }
+
+    // ------------------------------------------------------------------
+    // Command dispatch
+    // ------------------------------------------------------------------
+
+    /**
+     * Dispatches a single command from the correct context. Console command dispatch is a
+     * global operation on Folia and must never run on a region thread.
+     */
+    public static void dispatchCommand(CommandSender sender, String command) {
+        dispatchCommands(sender, List.of(command));
     }
 
     /**
-     * Runs a task in the region of a specific location in a world.
-     * Falls back to regular scheduling on non-Folia servers.
-     *
-     * @param location  The location in whose region to run the task
-     * @param runnable  The task to run
-     * @return A Task object representing the scheduled task
+     * Dispatches commands sequentially inside a single global task. This guarantees
+     * ordering, runs each command exactly once, and keeps the region thread free.
      */
-    public static Task runWorldTask(Location location, Runnable runnable) {
-        if (isFolia && location != null && location.getWorld() != null) {
-            try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getRegionScheduler().run(plugin, location, scheduledTask -> runnable.run());
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling world task in Folia, falling back to global scheduler", e);
-                return runTask(runnable);
-            }
-        } else {
-            return runTask(runnable);
+    public static void dispatchCommands(CommandSender sender, List<String> commands) {
+        if (sender == null || commands == null || commands.isEmpty()) {
+            return;
         }
+        List<String> queue = List.copyOf(commands);
+        runGlobal(() -> {
+            for (String command : queue) {
+                if (command == null || command.isBlank()) {
+                    continue;
+                }
+                try {
+                    Bukkit.dispatchCommand(sender, command);
+                } catch (Throwable t) {
+                    Plugin current = plugin();
+                    if (current != null) {
+                        current.getLogger().log(Level.WARNING,
+                                "Failed to dispatch command '" + command + "'", t);
+                    }
+                }
+            }
+        });
     }
 
+    // ------------------------------------------------------------------
+    // Lifecycle
+    // ------------------------------------------------------------------
+
     /**
-     * Runs a delayed task in the region of a specific location in a world.
-     *
-     * @param location   The location in whose region to run the task
-     * @param runnable   The task to run
-     * @param delayTicks The delay in ticks before running the task
-     * @return A Task object representing the scheduled task
+     * Cancels every task owned by the plugin. Region-scoped tasks are tied to their region
+     * and entity tasks to their entity, both of which are retired with the server state,
+     * while global/async tasks are cancelled directly.
      */
-    public static Task runWorldTaskLater(Location location, Runnable runnable, long delayTicks) {
-        if (isFolia && location != null && location.getWorld() != null) {
-            try {
-                io.papermc.paper.threadedregions.scheduler.ScheduledTask task =
-                        Bukkit.getRegionScheduler().runDelayed(plugin, location, scheduledTask -> runnable.run(),
-                                delayTicks < 1 ? 1 : delayTicks);
-                return new Task(task);
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Error scheduling delayed world task in Folia, falling back to global scheduler", e);
-                return runTaskLater(runnable, delayTicks);
-            }
-        } else {
-            return runTaskLater(runnable, delayTicks);
+    public static void cancelAll(Plugin owner) {
+        if (owner == null) {
+            return;
         }
-    }
-
-    /**
-     * Creates a CompletableFuture that will be completed on the main thread or global region.
-     *
-     * @param <T>      The type of the result
-     * @param supplier The supplier providing the result
-     * @return A CompletableFuture that will be completed with the result
-     */
-    public static <T> CompletableFuture<T> supplySync(Supplier<T> supplier) {
-        CompletableFuture<T> future = new CompletableFuture<>();
-
         try {
-            if (isFolia) {
-                Bukkit.getGlobalRegionScheduler().run(plugin, task -> {
-                    try {
-                        future.complete(supplier.get());
-                    } catch (Throwable t) {
-                        future.completeExceptionally(t);
-                        plugin.getLogger().log(Level.SEVERE, "Error while executing sync task", t);
-                    }
-                });
+            if (FOLIA) {
+                Bukkit.getGlobalRegionScheduler().cancelTasks(owner);
+                Bukkit.getAsyncScheduler().cancelTasks(owner);
             } else {
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    try {
-                        future.complete(supplier.get());
-                    } catch (Throwable t) {
-                        future.completeExceptionally(t);
-                        plugin.getLogger().log(Level.SEVERE, "Error while executing sync task", t);
-                    }
-                });
+                Bukkit.getScheduler().cancelTasks(owner);
             }
         } catch (Throwable t) {
-            future.completeExceptionally(t);
+            owner.getLogger().log(Level.WARNING, "Failed to cancel plugin tasks", t);
         }
+    }
 
-        return future;
+    private static void logUnavailable(String type) {
+        Plugin current = plugin;
+        if (current != null) {
+            current.getLogger().warning("Cannot schedule " + type + " task: plugin is not enabled");
+        }
     }
 
     /**
-     * Creates a CompletableFuture that will be completed asynchronously.
-     *
-     * @param <T>      The type of the result
-     * @param supplier The supplier providing the result
-     * @return A CompletableFuture that will be completed with the result
+     * Platform-neutral task handle wrapping either a BukkitTask or a Folia ScheduledTask.
      */
-    public static <T> CompletableFuture<T> supplyAsync(Supplier<T> supplier) {
-        CompletableFuture<T> future = new CompletableFuture<>();
+    public static final class Task {
 
-        try {
-            if (isFolia) {
-                Bukkit.getAsyncScheduler().runNow(plugin, task -> {
-                    try {
-                        future.complete(supplier.get());
-                    } catch (Throwable t) {
-                        future.completeExceptionally(t);
-                        plugin.getLogger().log(Level.SEVERE, "Error while executing async task", t);
-                    }
-                });
-            } else {
-                Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                    try {
-                        future.complete(supplier.get());
-                    } catch (Throwable t) {
-                        future.completeExceptionally(t);
-                        plugin.getLogger().log(Level.SEVERE, "Error while executing async task", t);
-                    }
-                });
-            }
-        } catch (Throwable t) {
-            future.completeExceptionally(t);
-        }
+        public static final Task EMPTY = new Task(null);
 
-        return future;
-    }
-
-    /**
-     * Wrapper class for both Bukkit and Folia tasks.
-     */
-    public static class Task {
         private final Object task;
 
-        /**
-         * Creates a new Task.
-         *
-         * @param task The underlying task object
-         */
-        Task(Object task) {
+        private Task(Object task) {
             this.task = task;
         }
 
-        /**
-         * Cancels the task.
-         */
         public void cancel() {
-            if (task == null) {
+            Object current = task;
+            if (current == null) {
                 return;
             }
-
             try {
-                if (isFolia) {
-                    if (task instanceof io.papermc.paper.threadedregions.scheduler.ScheduledTask) {
-                        ((io.papermc.paper.threadedregions.scheduler.ScheduledTask) task).cancel();
+                if (FOLIA) {
+                    if (current instanceof io.papermc.paper.threadedregions.scheduler.ScheduledTask scheduledTask) {
+                        scheduledTask.cancel();
                     }
-                } else {
-                    if (task instanceof BukkitTask) {
-                        ((BukkitTask) task).cancel();
-                    }
+                } else if (current instanceof BukkitTask bukkitTask) {
+                    bukkitTask.cancel();
                 }
-            } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Failed to cancel task", e);
+            } catch (Throwable t) {
+                Plugin currentPlugin = plugin();
+                if (currentPlugin != null) {
+                    currentPlugin.getLogger().log(Level.WARNING, "Failed to cancel task", t);
+                }
             }
         }
 
-        /**
-         * Gets the underlying task object.
-         *
-         * @return The underlying task object
-         */
-        public Object getTask() {
-            return task;
-        }
-
-        /**
-         * Checks if this task is cancelled.
-         *
-         * @return true if the task is cancelled
-         */
         public boolean isCancelled() {
-            if (task == null) {
+            Object current = task;
+            if (current == null) {
                 return true;
             }
-
-            try {
-                if (isFolia) {
-                    if (task instanceof io.papermc.paper.threadedregions.scheduler.ScheduledTask) {
-                        return ((io.papermc.paper.threadedregions.scheduler.ScheduledTask) task).isCancelled();
-                    }
-                } else {
-                    if (task instanceof BukkitTask) {
-                        return ((BukkitTask) task).isCancelled();
-                    }
+            if (FOLIA) {
+                if (current instanceof io.papermc.paper.threadedregions.scheduler.ScheduledTask scheduledTask) {
+                    return scheduledTask.isCancelled();
                 }
-            } catch (Exception ignored) {
-                // Task may have already been garbage collected or is invalid
+            } else if (current instanceof BukkitTask bukkitTask) {
+                return bukkitTask.isCancelled();
             }
-
             return true;
+        }
+
+        public Object getTask() {
+            return task;
         }
     }
 }

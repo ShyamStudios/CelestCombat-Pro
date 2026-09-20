@@ -16,18 +16,36 @@ public class DeathAnimationManager {
     private final CelestCombatPro plugin;
     private final Random random = new Random();
 
+    // Cached configuration (written on reload, read on region threads)
+    private volatile boolean enabled;
+    private volatile boolean onlyPlayerKill;
+    private volatile boolean lightningEnabled;
+    private volatile boolean fireParticlesEnabled;
+
     public DeathAnimationManager(CelestCombatPro plugin) {
         this.plugin = plugin;
+        reloadConfig();
+    }
+
+    public void reloadConfig() {
+        this.enabled = plugin.getConfig().getBoolean("death_animation.enabled", true);
+        this.onlyPlayerKill = plugin.getConfig().getBoolean("death_animation.only_player_kill", true);
+        this.lightningEnabled = plugin.getConfig().getBoolean("death_animation.animation.lightning", true);
+        this.fireParticlesEnabled = plugin.getConfig().getBoolean("death_animation.animation.fire_particles", true);
     }
 
     public void performDeathAnimation(Player victim, Player killer) {
         // Check if death animations are enabled
-        if (!plugin.getConfig().getBoolean("death_animation.enabled", true)) {
+        if (!enabled) {
             return;
         }
 
         // Check if the death was by another player
-        if (killer == null && plugin.getConfig().getBoolean("death_animation.only_player_kill", true)) {
+        if (killer == null && onlyPlayerKill) {
+            return;
+        }
+
+        if (victim == null) {
             return;
         }
 
@@ -36,14 +54,12 @@ public class DeathAnimationManager {
 
         if (world == null) return;
 
-        // Get available animations from config
-        List<String> availableAnimations = new ArrayList<>();
-
-        // Check each animation type
-        if (plugin.getConfig().getBoolean("death_animation.animation.lightning", true)) {
+        // Build the available animation list from cached config
+        List<String> availableAnimations = new ArrayList<>(2);
+        if (lightningEnabled) {
             availableAnimations.add("lightning");
         }
-        if (plugin.getConfig().getBoolean("death_animation.animation.fire_particles", true)) {
+        if (fireParticlesEnabled) {
             availableAnimations.add("fire_particles");
         }
 
@@ -55,14 +71,16 @@ public class DeathAnimationManager {
         // Randomly select an animation if multiple are true
         String selectedAnimation = availableAnimations.get(random.nextInt(availableAnimations.size()));
 
-        // Schedule the animation
-        Scheduler.runLocationTask(deathLocation, () -> {
+        // World effects must run on the region that owns the death location
+        Scheduler.runRegion(deathLocation, () -> {
             switch (selectedAnimation) {
                 case "lightning":
                     performLightningAnimation(world, deathLocation);
                     break;
                 case "fire_particles":
                     performParticleAnimation(world, deathLocation);
+                    break;
+                default:
                     break;
             }
         });

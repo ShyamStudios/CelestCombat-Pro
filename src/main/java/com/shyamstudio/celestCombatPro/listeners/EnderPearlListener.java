@@ -14,6 +14,7 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.ItemStack;
 
@@ -204,6 +205,13 @@ public class EnderPearlListener implements Listener {
         if (event.getEntity() instanceof EnderPearl) {
             activePearls.remove(event.getEntity().getEntityId());
         }
+    }
+
+    /** Drop tracker entries for pearls owned by a disconnecting player (pearls may despawn without a hit event). */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID playerUUID = event.getPlayer().getUniqueId();
+        activePearls.entrySet().removeIf(entry -> entry.getValue().equals(playerUUID));
     }
 
     // -------------------------------------------------------------------------
