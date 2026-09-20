@@ -1,0 +1,17 @@
+build/
+target/
+out/
+bin/
+.gradle/
+run/
+
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+*.log
+.DS_Store
+Thumbs.db
